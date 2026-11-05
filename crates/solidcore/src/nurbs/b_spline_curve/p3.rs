@@ -2818,7 +2818,7 @@ mod tests {
         on.fixes.query_statuses_pass_on = true;
         let off = Kernel::default();
 
-        let deg = crate::nurbs::nurbs_crv::MAX_DEGREE;
+        let deg = MAX_DEGREE;
         let mut knots = vec![0.0; deg + 1];
         knots.extend(core::iter::repeat_n(1.0, deg + 1));
         let pts: Vec<[f64; 3]> = (0..=deg).map(|i| [i as f64, 0.0, 0.0]).collect();
