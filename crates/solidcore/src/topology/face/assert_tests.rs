@@ -48,6 +48,7 @@ use crate::geom::solution_array::{ObjectKind, SolutionObject, SolutionType};
 use crate::geom::tol::xsect_tol_3d_from_zones;
 use crate::kernel::Kernel;
 use crate::math::{EFF_ZERO, EFF_ZERO_SQ};
+use crate::query::r#loop::WindingHull;
 use crate::topology::brep::validation::spatial::SpatialIndex;
 use crate::topology::edgeuse::p1 as eu1;
 use crate::topology::edgeuse::p3 as eu3;
@@ -433,9 +434,39 @@ pub fn assert_test_face38(k: &Kernel, b: &mut Brep, f: FaceId) -> Result<bool> {
         return Ok(true);
     }
 
-    // for every pair of Face Loops
-    for (ii, &l1) in loops.iter().enumerate() {
-        for &l2 in loops.iter().skip(ii + 1) {
+    // Not upstream (with `Kernel::memoize_curve_caches`): a pair whose winding hulls are
+    // apart cannot meet and is not intersected. The loops go in order of their hulls' lowest
+    // `u`, so that a loop stops at the first later hull past its own in `u`; the result is
+    // the same, and a face with many loops no longer intersects every pair of them. A loop
+    // with no hull yet (a trim still to build) goes with every other loop.
+    let gap = {
+        let zone_tol_3d = crate::surface::surface::p1::zone_tol_3d(k, &surface)?;
+        let mid = surface.natural_uv_domain_with_nurb(k)?.mid();
+        4.0 * crate::surface::surface::p1::map_to_2d(k, zone_tol_3d, mid, &surface)?
+    };
+    let mut hulled: Vec<(LoopId, WindingHull)> = Vec::new();
+    let mut unhulled: Vec<LoopId> = Vec::new();
+    for &l in &loops {
+        match WindingHull::of(k, b, l).filter(|_| k.memoize_curve_caches) {
+            Some(h) => hulled.push((l, h)),
+            None => unhulled.push(l),
+        }
+    }
+    hulled.sort_by(|(_, a), (_, c)| a.u_min().total_cmp(&c.u_min()));
+
+    for (ii, &(l1, h1)) in hulled.iter().enumerate() {
+        for &(l2, h2) in hulled.iter().skip(ii + 1) {
+            if h2.u_min() > h1.u_max() + gap {
+                break;
+            }
+            if !h1.apart(&h2, gap) && do_loops_intersect_in_uv(k, b, l1, l2, &surface)? {
+                return Ok(false);
+            }
+        }
+    }
+    for (ii, &l1) in unhulled.iter().enumerate() {
+        let hulled_loops = hulled.iter().map(|&(l, _)| l);
+        for l2 in unhulled.iter().skip(ii + 1).copied().chain(hulled_loops) {
             if do_loops_intersect_in_uv(k, b, l1, l2, &surface)? {
                 return Ok(false);
             }

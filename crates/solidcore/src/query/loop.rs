@@ -869,6 +869,25 @@ impl WindingHull {
         (lo.x <= hi.x && lo.y <= hi.y).then_some(Self { lo, hi })
     }
 
+    /// The hull's lowest `u`.
+    pub(crate) const fn u_min(&self) -> f64 {
+        self.lo.x
+    }
+
+    /// The hull's highest `u`.
+    pub(crate) const fn u_max(&self) -> f64 {
+        self.hi.x
+    }
+
+    /// Whether the hulls are apart in `u` or `v` by more than `gap`, so that no point of
+    /// the one loop's trims lies within `gap` of a point of the other's.
+    pub(crate) fn apart(&self, other: &Self, gap: f64) -> bool {
+        self.hi.x + gap < other.lo.x
+            || other.hi.x + gap < self.lo.x
+            || self.hi.y + gap < other.lo.y
+            || other.hi.y + gap < self.lo.y
+    }
+
     /// Whether `uv` lies outside the hull in `u` or `v` by more than an evaluation's
     /// rounding (`1e-6` of the hull's size and of the coordinates), so that the walk of
     /// [`contains_uv_point`] from it cannot answer [`PointContainment::Inside`], given
