@@ -3187,23 +3187,23 @@ fn delete_face_nesting(
         // (an empty list is only an SE(SM_ERR) upstream)
 
         // single/multiple shell check
-        let mut need_traversal = true;
+        let mut others = Vec::new();
         for v in verts.iter().flatten().copied() {
             // subtract shell vertices - they already have been given their new shells
             if vertex::is_shell_vertex(b, v)? {
                 *vertex_count = vertex_count.wrapping_sub(1);
-                continue;
+            } else {
+                others.push(v);
             }
-            if need_traversal {
-                marks.with_marks(env.records, env.key_of, |marks| {
-                    tt::shell_traversal_with_marks(k, b, marks, v, shell, None, None, lock)
-                })?;
-                need_traversal = false;
-            }
-            // subtract marked vertices - they have a home in the original Shell
-            if marks.with_marks(env.records, env.key_of, |marks| {
-                marks.is_marked(k, Entity::Vertex(v), lock.mark_type())
-            }) {
+        }
+        // subtract the vertices the walk from the first one reaches - they have a home in
+        // the original Shell (not upstream: the walk stops once it has reached them all,
+        // `shell_reaches`, where upstream walks the whole shell and reads the marks)
+        if let Some(&start) = others.first() {
+            let reached = marks.with_marks(env.records, env.key_of, |marks| {
+                tt::shell_reaches(k, b, marks, start, shell, &others, lock)
+            })?;
+            for _ in reached.into_iter().filter(|&r| r) {
                 *vertex_count = vertex_count.wrapping_sub(1);
             }
         }

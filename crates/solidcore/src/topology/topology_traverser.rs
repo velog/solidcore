@@ -491,6 +491,90 @@ pub fn faceuse_shell_replacement(
     Ok(())
 }
 
+/// The vertices a [`shell_reaches`] walk looks for: which of them it has reached.
+struct Reach<'a> {
+    targets: &'a [VertexId],
+    found: Vec<bool>,
+    left: usize,
+}
+
+impl Reach<'_> {
+    /// Note that the walk reaches `vu`'s vertex (it is on the stack, so the full walk
+    /// would mark it); true once every target is reached.
+    fn reached(&mut self, b: &Brep, vu: VertexuseId) -> Result<bool> {
+        let v = required(b.vertexuse(vu)?.vertex)?;
+        for (t, found) in self.targets.iter().zip(self.found.iter_mut()) {
+            if *t == v && !*found {
+                *found = true;
+                self.left -= 1;
+            }
+        }
+        Ok(self.left == 0)
+    }
+}
+
+/// Pushes `vu` onto the walk's stack; true when a [`Reach`] has found every target.
+fn push_reaching(
+    b: &Brep,
+    stack: &mut Vec<VertexuseId>,
+    reach: &mut Option<&mut Reach<'_>>,
+    vu: VertexuseId,
+) -> Result<bool> {
+    stack.push(vu);
+    match reach {
+        Some(r) => r.reached(b, vu),
+        None => Ok(false),
+    }
+}
+
+/// Which of `targets` the shell connectivity walk from `start` reaches within `shell`
+/// (the vertices [`shell_traversal_with_marks`] would mark), stopping as soon as all of
+/// them are reached.
+///
+/// Not upstream: `SmBrep::DeleteFace` walks the whole shell after each deleted face to
+/// learn whether the face's own vertices are still connected, which made deleting the
+/// faces a Boolean discards quadratic in the shell's size (a plate with 1024 holes). The
+/// answer is the same; the marks of the entities the walk did not reach are not set.
+///
+/// # Errors
+/// Those of [`shell_traversal_with_marks`].
+#[allow(clippy::too_many_arguments)]
+pub fn shell_reaches(
+    k: &mut Kernel,
+    b: &Brep,
+    marks: &mut (impl FaceTraversalMarks + ?Sized),
+    start: VertexId,
+    shell: ShellId,
+    targets: &[VertexId],
+    lock: &MarkLock,
+) -> Result<Vec<bool>> {
+    let mut reach = Reach {
+        targets,
+        found: vec![false; targets.len()],
+        left: targets.len(),
+    };
+    lock.new_mark(std::slice::from_mut(&mut k.context))?;
+    check_mark(lock.mark_type())?;
+    for vu in vertex::vertexuses(b, start)? {
+        if vertexuse::shell(b, vu)? == Some(shell) {
+            shell_connectivity(
+                k,
+                b,
+                marks,
+                vu,
+                shell,
+                lock.mark_type(),
+                &mut None,
+                &mut None,
+                &mut Some(&mut reach),
+            )?;
+            break;
+        }
+    }
+    Ok(reach.found)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn shell_connectivity(
     k: &Kernel,
     b: &Brep,
@@ -500,9 +584,13 @@ fn shell_connectivity(
     mark: MarkType,
     edgeuses: &mut Option<&mut Vec<EdgeuseId>>,
     faceuses: &mut Option<&mut Vec<FaceuseId>>,
+    reach: &mut Option<&mut Reach<'_>>,
 ) -> Result<()> {
     marks.mark(k, Entity::Vertexuse(start), mark);
-    let mut stack = vec![start];
+    let mut stack = Vec::new();
+    if push_reaching(b, &mut stack, reach, start)? {
+        return Ok(());
+    }
     while let Some(vu) = stack.pop() {
         let mut propagate = Vec::new();
         let fu = if vertexuse::is_edge_vertexuse(b, vu)? {
@@ -515,7 +603,9 @@ fn shell_connectivity(
                 let mate_vu = required(b.edgeuse(mate)?.vertexuse)?;
                 if !marks.is_marked(k, Entity::Vertexuse(mate_vu), mark) {
                     marks.mark(k, Entity::Vertexuse(mate_vu), mark);
-                    stack.push(mate_vu);
+                    if push_reaching(b, &mut stack, reach, mate_vu)? {
+                        return Ok(());
+                    }
                 }
             }
             if eu::is_loop_edgeuse(b, e)? {
@@ -549,7 +639,9 @@ fn shell_connectivity(
                     && vertexuse::shell(b, next)? == Some(shell)
                 {
                     marks.mark(k, Entity::Vertexuse(next), mark);
-                    stack.push(next);
+                    if push_reaching(b, &mut stack, reach, next)? {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -561,7 +653,9 @@ fn shell_connectivity(
                         && vertexuse::shell(b, next)? == Some(shell)
                     {
                         marks.mark(k, Entity::Vertexuse(next), mark);
-                        stack.push(next);
+                        if push_reaching(b, &mut stack, reach, next)? {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -620,6 +714,7 @@ pub fn shell_traversal_with_marks(
                 lock.mark_type(),
                 &mut edgeuses,
                 &mut faceuses,
+                &mut None,
             )?;
             break;
         }
@@ -892,5 +987,58 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    /// `shell_reaches` answers what the whole walk's vertex marks say, from every start
+    /// of a box and a box with its top deleted, with a vertex the shell does not use.
+    #[test]
+    fn shell_reaches_says_what_the_whole_walk_marks() {
+        use crate::geom::context::ALL_MARKS;
+        use crate::primitive::api_primitives::create_box;
+        let mut k = Kernel::default();
+        let at = crate::Point3::new(0.0, 0.0, 0.0);
+        let whole = create_box(&mut k, at, 1.0, 2.0, 3.0).unwrap();
+        let mut opened = create_box(&mut k, at, 1.0, 2.0, 3.0).unwrap();
+        let top = opened.faces().ids().next().unwrap();
+        crate::topology::brep::p3::edit_brep(&mut k, &mut opened, |k, b, scope| {
+            crate::topology::brep::p3::delete_face(
+                k,
+                b,
+                scope.env,
+                &mut scope.marks,
+                top,
+                crate::topology::brep::p3::DeleteFaceOptions::default(),
+            )
+        })
+        .unwrap();
+        for mut b in [whole, opened] {
+            let loose = b.add_vertex(Vec3::new(9.0, 9.0, 9.0)).unwrap();
+            let mut targets: Vec<VertexId> = b.vertices().ids().collect();
+            assert!(targets.contains(&loose));
+            targets.reverse();
+            let shell = b.shells().ids().next().unwrap();
+            for start in b.vertices().ids().collect::<Vec<_>>() {
+                let mut lock =
+                    MarkLock::new(core::slice::from_mut(&mut k.context), 0, ALL_MARKS).unwrap();
+                let mut marks = Marks::default();
+                let reached =
+                    shell_reaches(&mut k, &b, &mut marks, start, shell, &targets, &lock).unwrap();
+                let mut marks = Marks::default();
+                shell_traversal(&mut k, &b, &mut marks, start, shell, None, None, &lock).unwrap();
+                let marked: Vec<bool> = targets
+                    .iter()
+                    .map(|&v| marks.is_marked(&k, Entity::Vertex(v), lock.mark_type()))
+                    .collect();
+                lock.release(core::slice::from_mut(&mut k.context)).unwrap();
+                assert_eq!(reached, marked, "start {start:?}");
+                assert_eq!(reached.iter().filter(|&&r| r).count(), {
+                    if start == loose {
+                        0
+                    } else {
+                        targets.len() - 1
+                    }
+                });
+            }
+        }
     }
 }
