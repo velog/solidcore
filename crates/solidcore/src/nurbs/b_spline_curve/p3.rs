@@ -118,7 +118,7 @@ use crate::nurbs::b_spline_curve::p1::BSplineCurve;
 use crate::nurbs::b_spline_curve::p2::{BoundingBoxRequest, ControlPointForm};
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
 use crate::nurbs::geom::dist_cpt_cpt;
-use crate::nurbs::nurbs_crv::to_euclid;
+use crate::nurbs::nurbs_crv::{to_euclid, MAX_DEGREE};
 use crate::surface::surface::Surface;
 
 /// `SmLine_TYPE` (`CURV_BASE_TYPE + 10`).
@@ -1749,8 +1749,11 @@ impl BSplineCurve {
             // the search cannot report, and is not run (`analysis`; off without
             // `Kernel::memoize_curve_caches`). With `query_statuses_pass_on` the search's
             // own status is a test too: a bound also says that every evaluation of its
-            // objective succeeds, so there is no failure for that status to pass on.
-            let shortcut = k.memoize_curve_caches;
+            // objective succeeds, so there is no failure for that status to pass on. The
+            // search's Bezier segments (`create_bez_segments`) still refuse a degree at or
+            // above `GW_MAX_DEGREE`, which the bound does not see (#2009, tests 11-14).
+            let shortcut = k.memoize_curve_caches
+                && (!k.fixes.query_statuses_pass_on || cur.degree() < MAX_DEGREE);
             let bounds = if shortcut { curve_bounds(cur) } else { None };
             let speed_clear = bounds.is_some_and(|b| b.speed >= tol * BOUND_MARGIN);
             let solutions = if sized && speed_clear {
