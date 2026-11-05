@@ -1747,9 +1747,10 @@ impl BSplineCurve {
 
             // Not upstream (#2568): where the curve's speed is bounded above the tolerance
             // the search cannot report, and is not run (`analysis`; off without
-            // `Kernel::memoize_curve_caches`, and with `query_statuses_pass_on`, which
-            // reports the search's own status)
-            let shortcut = k.memoize_curve_caches && !k.fixes.query_statuses_pass_on;
+            // `Kernel::memoize_curve_caches`). With `query_statuses_pass_on` the search's
+            // own status is a test too: a bound also says that every evaluation of its
+            // objective succeeds, so there is no failure for that status to pass on.
+            let shortcut = k.memoize_curve_caches;
             let bounds = if shortcut { curve_bounds(cur) } else { None };
             let speed_clear = bounds.is_some_and(|b| b.speed >= tol * BOUND_MARGIN);
             let solutions = if sized && speed_clear {
