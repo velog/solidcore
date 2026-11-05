@@ -279,7 +279,7 @@ impl Brep {
     /// [`SolidError::InvalidInput`] otherwise.
     pub fn set_face_list(&mut self, order: Vec<FaceId>) -> Result<()> {
         check_order(&order, self.faces.ids())?;
-        self.face_list = order;
+        *self.face_list = order;
         Ok(())
     }
 
@@ -291,7 +291,7 @@ impl Brep {
     /// [`SolidError::InvalidInput`] otherwise.
     pub fn set_edge_list(&mut self, order: Vec<EdgeId>) -> Result<()> {
         check_order(&order, self.edges.ids())?;
-        self.edge_list = order;
+        *self.edge_list = order;
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl Brep {
     /// [`SolidError::InvalidInput`] otherwise.
     pub fn set_vertex_list(&mut self, order: Vec<VertexId>) -> Result<()> {
         check_order(&order, self.vertices.ids())?;
-        self.vertex_list = order;
+        *self.vertex_list = order;
         Ok(())
     }
 
@@ -321,7 +321,7 @@ impl Brep {
         if let Some(pos) = region.and_then(|r| order.iter().position(|&x| x == r)) {
             order.rotate_left(pos);
         }
-        self.region_order = order;
+        *self.region_order = order;
         self.region_list_head = region;
     }
 
@@ -352,7 +352,7 @@ impl Brep {
         {
             order.rotate_left(pos);
         }
-        self.region_order = order;
+        *self.region_order = order;
     }
 
     /// `AddDeletedSurface`: keeps a surface removed from the B-rep until the operation
