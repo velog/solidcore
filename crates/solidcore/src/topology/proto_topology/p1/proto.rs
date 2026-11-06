@@ -2587,6 +2587,10 @@ pub struct ProtoTopologyManager<O> {
     /// Boolean returns it once every proto edge is resolved
     /// ([`ProtoTopologyManager::take_self_loop_refusal`]).
     self_loop_refusal: Option<SolidError>,
+    /// Not upstream: the UV point `UpdateFaces` took of each edge definition on a split
+    /// face, by definition index and B-rep (1, 2), with what it was taken from
+    /// ([`ProtoTopologyManager::face_uv_kept`]).
+    face_uv_kept: Vec<[KeptFaceUv<O>; 2]>,
 }
 
 /// Not upstream: a contact point that a rule of the intersector proves one point although
@@ -2735,6 +2739,37 @@ impl DeclaredContact {
     }
 }
 
+/// A kept UV point of an edge definition and what it was taken from (`None`: none kept).
+type KeptFaceUv<O> = Option<(FaceUvSource<O>, Option<Point2>)>;
+
+/// What `UpdateFaces` takes an edge definition's UV point on a split face from: its 3D
+/// and UV curves, its interval and the face's surface (not upstream; see
+/// [`ProtoTopologyManager::face_uv_kept`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FaceUvSource<O> {
+    /// `m_pXSectCurve3d`.
+    pub(crate) curve_3d: Option<O>,
+    /// The definition's UV curve in the face's B-rep.
+    pub(crate) uv_curve: Option<O>,
+    /// `m_XSectInterval`.
+    pub(crate) interval: Extent1d,
+    /// Whether the split face is known.
+    pub(crate) face_known: bool,
+    /// The split face's surface handle.
+    pub(crate) surface: Option<O>,
+}
+
+impl<O: PartialEq> FaceUvSource<O> {
+    fn same(&self, other: &Self) -> bool {
+        self.curve_3d == other.curve_3d
+            && self.uv_curve == other.uv_curve
+            && self.face_known == other.face_known
+            && self.surface == other.surface
+            && self.interval.min().to_bits() == other.interval.min().to_bits()
+            && self.interval.max().to_bits() == other.interval.max().to_bits()
+    }
+}
+
 fn push_store<T>(store: &mut Vec<Option<T>>, item: T) -> Result<u32> {
     let index = u32::try_from(store.len()).map_err(|_| dangling("store is full"))?;
     store.push(Some(item));
@@ -2795,6 +2830,7 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
             regions: Vec::new(),
             coincident_edges: Vec::new(),
             self_loop_refusal: None,
+            face_uv_kept: Vec::new(),
         })
     }
 
@@ -3063,6 +3099,44 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
         self.edge_def_store
             .get(ed.0 as usize)
             .and_then(Option::as_ref)
+    }
+
+    /// Not upstream: the UV point (`None`: none was found) last taken of the edge
+    /// definition `ed` in B-rep `which` on a split face from `source`, when it was taken
+    /// from the same curves, interval and surface. The point is a function of those alone,
+    /// so it is the point taking it again would give.
+    #[allow(clippy::option_option)] // None: nothing kept; Some(None): kept, no point
+    pub(crate) fn face_uv_kept(
+        &self,
+        ed: EdgeDefId,
+        which: i32,
+        source: &FaceUvSource<O>,
+    ) -> Option<Option<Point2>> {
+        let slot = usize::from(which == 2);
+        let (kept, uv) = self.face_uv_kept.get(ed.0 as usize)?.get(slot)?.as_ref()?;
+        kept.same(source).then_some(*uv)
+    }
+
+    /// Not upstream: keeps the UV point `uv` taken of `ed` in B-rep `which` from `source`
+    /// ([`ProtoTopologyManager::face_uv_kept`]).
+    pub(crate) fn keep_face_uv(
+        &mut self,
+        ed: EdgeDefId,
+        which: i32,
+        source: FaceUvSource<O>,
+        uv: Option<Point2>,
+    ) {
+        let index = ed.0 as usize;
+        if self.face_uv_kept.len() <= index {
+            self.face_uv_kept.resize_with(index + 1, || [None, None]);
+        }
+        if let Some(slot) = self
+            .face_uv_kept
+            .get_mut(index)
+            .and_then(|s| s.get_mut(usize::from(which == 2)))
+        {
+            *slot = Some((source, uv));
+        }
     }
 
     /// Mutable access to the edge definition `ed`.
