@@ -117,6 +117,11 @@
 //!   as upstream: a failed evaluation leaves the binormal at its previous value
 //!   (`SM_UNDEF_DOUBLE` components before the first success), and a missing splitting
 //!   edge, which upstream dereferences, is [`SolidError::InvalidInput`].
+//! - **Not upstream: split faces' UV points are kept.** `UpdateFaces` takes the UV point
+//!   of every edge definition still on the split face, at every split; the point depends
+//!   only on the definition's curves and interval and the face's surface, so with
+//!   `Kernel::memoize_curve_caches` it is kept per definition with those and taken again
+//!   only when one changed (a plate cut by 1024 holes took it 2 million times).
 //! - **Recursion.** None.
 
 use crate::curve::curve::p1::GlobalPointSolveOptions;
@@ -145,7 +150,9 @@ use crate::topology::VertexId;
 
 mod imprint_ends;
 
-use super::p1::proto::{are_connected, can_imprint, find_position_from_pcs, topo_dimension};
+use super::p1::proto::{
+    are_connected, can_imprint, find_position_from_pcs, topo_dimension, FaceUvSource,
+};
 use super::p1::{
     EdgeDefId, EdgeDefinition, ProtoEdgeId, ProtoGeometry, ProtoTopology, ProtoTopologyManager,
     ProtoVertex, ProtoVertexId, VertexDefId, VertexDefinition,
@@ -2678,32 +2685,62 @@ impl<O: ClassObject> ProtoTopologyManager<O> {
                 continue;
             }
 
-            let mut face_uv = None;
-            let uv_curve = d.xsect_uv_curve(which);
-            let mid_param = d.xsect_interval().mid();
-            if uv_curve.is_some() {
-                if let Some(p) =
-                    ignore_soft(curve_of(brep, uv_curve)?.evaluate_point(k, mid_param))?
-                {
-                    face_uv = Some(Point2::new(p.x, p.y));
-                }
-            }
-            if face_uv.is_none() {
-                // drop a 3d MidPoint to the surface.
-                let surface = brep.face_surface(old_face).ok_or_else(unknown)?;
-                let mid_pt = match d.evaluate_mid(k, brep, true, false) {
-                    Ok((Some(p), _)) => p,
-                    // passed on with `ssi_proto_topology_statuses_pass_on` (fork bcc6f01)
-                    Err(e)
-                        if e.is_unported_or_cancelled()
-                            || k.fixes.ssi_proto_topology_statuses_pass_on =>
+            // Not upstream: the point is a function of the definition's curves, its
+            // interval and the face's surface, none of which a split changes, and every
+            // split of a face asks it again of every definition still on that face (a
+            // plate cut by n holes asked it n^2 times). It is kept per definition
+            // with what it was taken from (`Kernel::memoize_curve_caches`).
+            let source = FaceUvSource {
+                curve_3d: d.xsect_curve_3d(),
+                uv_curve: d.xsect_uv_curve(which),
+                interval: d.xsect_interval(),
+                face_known: brep.face_surface(old_face).is_some(),
+                surface: brep.face_surface(old_face).flatten(),
+            };
+            let kept = if k.memoize_curve_caches {
+                self.face_uv_kept(ed, which, &source)
+            } else {
+                None
+            };
+            let face_uv = if let Some(uv) = kept {
+                uv
+            } else {
+                let d = self.ed_ref(ed)?;
+                let mut face_uv = None;
+                let uv_curve = source.uv_curve;
+                let mid_param = source.interval.mid();
+                if uv_curve.is_some() {
+                    if let Some(p) =
+                        ignore_soft(curve_of(brep, uv_curve)?.evaluate_point(k, mid_param))?
                     {
-                        return Err(e)
+                        face_uv = Some(Point2::new(p.x, p.y));
                     }
-                    _ => Vec3::UNDEF,
-                };
-                face_uv = ignore_soft(surface_drop_point(k, brep, surface, mid_pt))?.flatten();
-            }
+                }
+                if face_uv.is_none() {
+                    // drop a 3d MidPoint to the surface.
+                    if !source.face_known {
+                        return Err(unknown());
+                    }
+                    let surface = source.surface;
+                    let mid_pt = match d.evaluate_mid(k, brep, true, false) {
+                        Ok((Some(p), _)) => p,
+                        // passed on with `ssi_proto_topology_statuses_pass_on` (fork
+                        // bcc6f01)
+                        Err(e)
+                            if e.is_unported_or_cancelled()
+                                || k.fixes.ssi_proto_topology_statuses_pass_on =>
+                        {
+                            return Err(e)
+                        }
+                        _ => Vec3::UNDEF,
+                    };
+                    face_uv = ignore_soft(surface_drop_point(k, brep, surface, mid_pt))?.flatten();
+                }
+                if k.memoize_curve_caches {
+                    self.keep_face_uv(ed, which, source, face_uv);
+                }
+                face_uv
+            };
             let Some(face_uv) = face_uv else { continue };
 
             let zone_tol = zone_tol_for_xsect_result(k, brep, old_face, new_face)?;
