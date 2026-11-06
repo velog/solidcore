@@ -1663,6 +1663,17 @@ impl<O: ClassObject + SolutionObject + Ord> TopologyIntersector<O> {
                 .proto_vertices()
                 .get(ii - 1)
                 .ok_or(invalid(OP_INTERSECT_TOPOLOGY, "proto vertex list"))?;
+            // (not upstream) only an edge-less proto vertex is ever removed, and nothing
+            // in this loop gives one proto edges, so a vertex with proto edges is passed
+            // over without the point solve against every proto edge (upstream solves
+            // them all and removes nothing: a plate cut by n holes made n^2 solves).
+            if mgr
+                .proto_vertex(pv)
+                .is_some_and(|p| !p.proto_edges().is_empty())
+            {
+                ii -= 1;
+                continue;
+            }
             let pes = mgr.proto_edges().to_vec();
             for pe in pes {
                 // a failure is FALSE (the SmBoolean function's error return)
