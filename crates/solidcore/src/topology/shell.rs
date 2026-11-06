@@ -609,24 +609,84 @@ pub fn shell_remove_faceuse(brep: &mut Brep, shell: ShellId, faceuse: FaceuseId)
         return Err(SolidError::sm_err(OP));
     }
     let members = &mut brep.shell_mut(shell)?.members;
-    match members {
+    // the members before and after the removed one, once it is out
+    let neighbours = match members {
         ShellMembers::Faceuses(list) => {
             let index = list
                 .iter()
                 .position(|id| *id == faceuse)
                 .ok_or_else(|| SolidError::sm_err(OP))?;
+            let n = list.len();
+            let around = |i: usize| {
+                list.get(i % n)
+                    .copied()
+                    .ok_or_else(|| SolidError::sm_err(OP))
+            };
+            let previous = around(index + n - 1)?;
+            let next = around(index + 1)?;
             list.remove(index);
             if list.is_empty() {
                 *members = ShellMembers::Empty;
             }
+            (previous, next)
         }
         ShellMembers::Empty => return Err(SolidError::sm_err(OP)),
         _ => return Err(invalid_members()),
-    }
+    };
     let record = brep.faceuse_mut(faceuse)?;
     record.shell = None;
     record.sibling_links = None;
-    refresh_faceuse_sibling_links(brep, shell)
+    relink_over_gap(brep, shell, faceuse, neighbours)
+}
+
+/// (not upstream) Closes the face-use ring over a removed member by relinking only
+/// its two neighbours, when their links show the ring was in step with the list
+/// (upstream relinks every member, so deleting n faces of an n-face shell was n^2).
+/// Otherwise every member is relinked, as upstream.
+fn relink_over_gap(
+    brep: &mut Brep,
+    shell: ShellId,
+    removed: FaceuseId,
+    (previous, next): (FaceuseId, FaceuseId),
+) -> Result<()> {
+    if previous == removed {
+        // it was the only member
+        return Ok(());
+    }
+    let before = brep.faceuse(previous)?.sibling_links;
+    let after = brep.faceuse(next)?.sibling_links;
+    // a member appended without relinking (`brep::p10`'s PostInsert) leaves the ring's
+    // ends out of step with the list: those ends are checked too
+    let ends_in_step = match &brep.shell(shell)?.members {
+        ShellMembers::Faceuses(list) => match (list.first(), list.last()) {
+            (Some(&head), Some(&tail)) => {
+                let h = brep.faceuse(head)?.sibling_links;
+                let t = brep.faceuse(tail)?.sibling_links;
+                let h_ok = h.is_none_or(|(_, p)| p == Some(tail) || p == Some(removed));
+                let t_ok = t.is_none_or(|(n, _)| n == Some(head) || n == Some(removed));
+                h_ok && t_ok
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    let in_step = ends_in_step
+        && matches!(before, Some((Some(n), _)) if n == removed)
+        && matches!(after, Some((_, Some(p))) if p == removed);
+    if !in_step {
+        return refresh_faceuse_sibling_links(brep, shell);
+    }
+    if previous == next {
+        brep.faceuse_mut(previous)?.sibling_links = Some((Some(previous), Some(previous)));
+        return Ok(());
+    }
+    if let Some(links) = &mut brep.faceuse_mut(previous)?.sibling_links {
+        links.0 = Some(next);
+    }
+    if let Some(links) = &mut brep.faceuse_mut(next)?.sibling_links {
+        links.1 = Some(previous);
+    }
+    Ok(())
 }
 
 /// `pShell->PostInsert(pFU)` (`SmOwningTopology::PostInsert`): appends the face use
@@ -2117,6 +2177,84 @@ mod tests {
         shell_remove_faceuse(&mut brep, s, c).unwrap();
         assert_eq!(brep.shell(s).unwrap().members, ShellMembers::Empty);
         assert_eq!(shell_list_size(&brep, s).unwrap(), 0);
+    }
+
+    /// Removing face uses relinks only the neighbours, and every member then has the
+    /// links a full relink of the list gives: at the head, the tail, the middle, down
+    /// to one member; from linked rings, rings without literal links and rings a
+    /// member was appended to without relinking.
+    #[test]
+    fn remove_relinks_like_a_full_relink() {
+        fn ring(brep: &mut Brep, n: usize) -> (ShellId, Vec<FaceuseId>) {
+            let s = brep.add_shell_record(Shell::default()).unwrap();
+            let ids: Vec<_> = (0..n)
+                .map(|_| {
+                    brep.add_faceuse_record(Faceuse {
+                        shell: Some(s),
+                        ..Faceuse::default()
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let sh = brep.shell_mut(s).unwrap();
+            sh.shell_type = ShellType::Faceuse;
+            sh.members = ShellMembers::Faceuses(ids.clone());
+            (s, ids)
+        }
+        // what a full relink writes: each member's neighbours in the list
+        fn expected(list: &[FaceuseId]) -> Vec<FaceuseSiblingLinks> {
+            let n = list.len();
+            (0..n)
+                .map(|i| (Some(list[(i + 1) % n]), Some(list[(i + n - 1) % n])))
+                .collect()
+        }
+        fn links(brep: &Brep, s: ShellId) -> Vec<FaceuseSiblingLinks> {
+            let members = brep
+                .shell(s)
+                .map(|x| x.get_faceuses().unwrap())
+                .unwrap_or_default();
+            members
+                .iter()
+                .map(|&m| faceuse_sibling_links(brep, m).unwrap())
+                .collect()
+        }
+        // (ring kind, order of removal by position in the original list)
+        for kind in 0..3 {
+            for order in [
+                vec![0, 1, 2, 3, 4, 5],
+                vec![5, 4, 3, 2, 1, 0],
+                vec![2, 4, 0, 5, 1, 3],
+            ] {
+                let mut brep = Brep::new();
+                let (s, ids) = ring(&mut brep, 6);
+                match kind {
+                    0 => refresh_faceuse_sibling_links(&mut brep, s).unwrap(),
+                    1 => {} // no literal links: derived from the list
+                    _ => {
+                        // the last member was appended without relinking (`brep::p10`)
+                        let mut first = ids.clone();
+                        first.pop();
+                        brep.shell_mut(s).unwrap().members = ShellMembers::Faceuses(first);
+                        refresh_faceuse_sibling_links(&mut brep, s).unwrap();
+                        brep.shell_mut(s).unwrap().members = ShellMembers::Faceuses(ids.clone());
+                    }
+                }
+                for &k in &order {
+                    let left: Vec<_> = brep
+                        .shell(s)
+                        .unwrap()
+                        .get_faceuses()
+                        .unwrap()
+                        .into_iter()
+                        .filter(|&x| x != ids[k])
+                        .collect();
+                    let want = expected(&left);
+                    shell_remove_faceuse(&mut brep, s, ids[k]).unwrap();
+                    assert_eq!(links(&brep, s), want, "kind {kind} order {order:?} at {k}");
+                    assert_eq!(faceuse_sibling_links(&brep, ids[k]).unwrap(), (None, None));
+                }
+            }
+        }
     }
 
     #[test]
