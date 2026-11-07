@@ -325,6 +325,11 @@ pub trait TopologyRecords {
 pub struct NotifyRecords {
     map: BTreeMap<ObjectKey, Topology>,
     progress: Vec<SeedProgress>,
+    /// (not upstream) Per arena kind, the slot count up to which every live object of
+    /// the B-rep these records were last made for has its arena-identity record and no
+    /// removed object has one (`topology::brep::p2::renew_arena_records`); `None` once
+    /// anything may have changed the keys otherwise.
+    arena_seeded: Option<[usize; 10]>,
     /// The keys of the records handed out mutably since [`Self::reset_changed`] last ran,
     /// in hand-out order, with repeats (not upstream: so a reset visits only those).
     changed: Vec<ObjectKey>,
@@ -396,6 +401,7 @@ impl From<BTreeMap<ObjectKey, Topology>> for NotifyRecords {
         Self {
             map,
             progress: Vec::new(),
+            arena_seeded: None,
             changed: Vec::new(),
             all_changed,
         }
@@ -458,19 +464,21 @@ impl NotifyRecords {
     /// Removes the record of `key`.
     pub fn remove(&mut self, key: &ObjectKey) -> Option<Topology> {
         self.progress.clear();
+        self.arena_seeded = None;
         self.map.remove(key)
     }
 
     /// Removes the record of `key`, an object that is gone, keeping the seeding
     /// progress: the progress only says which live objects have their record, and a
     /// removed object's slot is never live again (arenas only empty slots for good).
-    pub(crate) fn remove_dead(&mut self, key: &ObjectKey) -> Option<Topology> {
-        self.map.remove(key)
+    pub(crate) fn remove_dead(&mut self, key: ObjectKey) -> Option<Topology> {
+        self.map.remove(&key)
     }
 
     /// Keeps the records `keep` accepts (it may also change them).
     pub fn retain(&mut self, keep: impl FnMut(&ObjectKey, &mut Topology) -> bool) {
         self.progress.clear();
+        self.arena_seeded = None;
         self.all_changed = true;
         self.map.retain(keep);
     }
@@ -478,6 +486,7 @@ impl NotifyRecords {
     /// Removes every record.
     pub fn clear(&mut self) {
         self.progress.clear();
+        self.arena_seeded = None;
         self.changed.clear();
         self.all_changed = false;
         self.map.clear();
@@ -491,6 +500,7 @@ impl NotifyRecords {
     /// one ascending walk of both.
     pub(crate) fn reset_to_keys(&mut self, keys: &[ObjectKey]) {
         self.progress.clear();
+        self.arena_seeded = None;
         self.reset_changed();
         let (mut gone, mut new) = (Vec::new(), Vec::new());
         let mut wanted = keys.iter().peekable();
@@ -509,6 +519,44 @@ impl NotifyRecords {
         for key in new {
             self.map.insert(key, Topology::default());
         }
+    }
+
+    /// The arena seeding mark ([`Self::arena_seeded`] field), taken out.
+    pub(crate) fn take_arena_seeded(&mut self) -> Option<[usize; 10]> {
+        self.arena_seeded.take()
+    }
+
+    /// Sets the arena seeding mark: the caller has just made every live object's record
+    /// and no other, up to these slot counts.
+    pub(crate) fn set_arena_seeded(&mut self, seeded: [usize; 10]) {
+        self.arena_seeded = Some(seeded);
+    }
+
+    /// Marks every record as unchanged: for a store whose records were all just made
+    /// default ([`FromIterator`] of default records counts them all as changed).
+    pub(crate) fn mark_all_default(&mut self) {
+        self.changed.clear();
+        self.all_changed = false;
+    }
+
+    /// Makes every record handed out mutably since the last reset default again and
+    /// removes those of them whose object `live` says is gone, keeping the keys of the
+    /// others and the seeding progress; `false`, changing nothing, after a bulk
+    /// mutable access (which records changed is not known then).
+    pub(crate) fn reset_changed_dropping(&mut self, live: impl Fn(ObjectKey) -> bool) -> bool {
+        if self.all_changed {
+            return false;
+        }
+        for key in core::mem::take(&mut self.changed) {
+            if live(key) {
+                if let Some(record) = self.map.get_mut(&key) {
+                    *record = Topology::default();
+                }
+            } else {
+                self.map.remove(&key);
+            }
+        }
+        true
     }
 
     /// Makes every record handed out mutably since the last reset (or every record,

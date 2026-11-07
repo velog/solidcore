@@ -132,7 +132,6 @@ fn with_face_env<T>(
 #[derive(Default)]
 struct FaceStates {
     state: Option<crate::topology::brep::p2::ArenaNotifyState>,
-    seeded_to: [usize; crate::topology::brep::p3::KINDS],
 }
 
 /// [`with_face_env`] over the run's state `states`.
@@ -148,13 +147,10 @@ fn with_face_env_in<T>(
 ) -> Result<T> {
     let state = match &mut states.state {
         Some(state) => {
-            state.renew(b, &mut states.seeded_to);
+            state.renew(b);
             state
         }
-        none => {
-            states.seeded_to = crate::topology::brep::p3::slot_counts(b);
-            none.insert(crate::topology::brep::p2::ArenaNotifyState::new(b))
-        }
+        none => none.insert(crate::topology::brep::p2::ArenaNotifyState::new(b)),
     };
     let mut env = state.env(None);
     let mut marks = crate::topology::topology_traverser::Marks::default();

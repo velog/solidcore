@@ -1107,12 +1107,35 @@ pub(crate) fn seed_arena_from(
             } else {
                 // (an object the last edit made and removed again: an edit's own
                 // seeding gave it a record while it lived)
-                records.remove_dead(&key);
+                records.remove_dead(key);
             }
         }
         *from = slots.max(*from);
     }
     live_counts(b).into_iter().sum()
+}
+
+/// (not upstream) Whether the object an arena-identity key names
+/// ([`crate::topology::loopuse::notify_ref`]) is live in `b`; `true` for the B-rep and
+/// for a key that names no arena object (nothing to tell).
+pub(crate) fn arena_key_is_live(b: &Brep, key: ObjectKey) -> bool {
+    let Some(e) = crate::topology::loopuse::entity_of_notify_key(key) else {
+        return true;
+    };
+    let (kind, index) = match e {
+        EntityRef::Brep(_) => return true,
+        EntityRef::Region(x) => (0, x.index()),
+        EntityRef::Shell(x) => (1, x.index()),
+        EntityRef::Faceuse(x) => (2, x.index()),
+        EntityRef::Face(x) => (3, x.index()),
+        EntityRef::Loopuse(x) => (4, x.index()),
+        EntityRef::Loop(x) => (5, x.index()),
+        EntityRef::Edgeuse(x) => (6, x.index()),
+        EntityRef::Edge(x) => (7, x.index()),
+        EntityRef::Vertexuse(x) => (8, x.index()),
+        EntityRef::Vertex(x) => (9, x.index()),
+    };
+    is_live(b, kind, index)
 }
 
 /// The slot count of each kind, removed slots included (the next index of each).
