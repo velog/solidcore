@@ -1393,6 +1393,30 @@ pub(crate) fn kernel_named_edit<R>(
     b: &mut Brep,
     edit: impl FnOnce(&mut Kernel, &mut Brep, &mut NotifyEnv<'_>) -> Result<R>,
 ) -> Result<R> {
+    kernel_named_edit_rebinding(k, context, b, Rebind::All, edit)
+}
+
+/// (not upstream) Which geometry [`kernel_named_edit`] rebinds from the edit's
+/// identities when the edit ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rebind {
+    /// Every edge's, edge use's and face's (an edit that may rewrite geometry it does
+    /// not notify: a transform, a mirror).
+    All,
+    /// Only that of the objects the edit notified or made: for small edits of a large
+    /// B-rep in a row (a stitch's vertex glues), where walking every object per edit is
+    /// quadratic. Lib tests walk every object as well and require nothing left.
+    Touched,
+}
+
+/// [`kernel_named_edit`] rebinding `rebind`'s geometry.
+pub(crate) fn kernel_named_edit_rebinding<R>(
+    k: &mut Kernel,
+    context: &mut Context,
+    b: &mut Brep,
+    rebind: Rebind,
+    edit: impl FnOnce(&mut Kernel, &mut Brep, &mut NotifyEnv<'_>) -> Result<R>,
+) -> Result<R> {
     let serial = notify_serial(context, b)?;
     let key_of = move |e: EntityRef| topology_ref(serial, e);
     let label = b.key();
@@ -1402,6 +1426,7 @@ pub(crate) fn kernel_named_edit<R>(
     let mut attributes = crate::geom::attribute::AttributeStore::default();
     // (not upstream) the B-rep's own attributes, under the edit's identities
     let seeded = p2::seed_brep_attributes(&mut attributes, b.take_attributes(), &key_of);
+    let slots_before = slot_counts(b);
     let r = seeded.and_then(|()| {
         let mut env = NotifyEnv {
             records: &mut records,
@@ -1422,9 +1447,28 @@ pub(crate) fn kernel_named_edit<R>(
         naming,
         crate::topology::NamingScheme::Notify | crate::topology::NamingScheme::Arena
     ) {
-        rebind_geometry_owners(b, key_of, |e| {
-            crate::topology::scheme_owner_identity(naming, e)
-        })
+        let to = |e| crate::topology::scheme_owner_identity(naming, e);
+        // (not upstream) for `Rebind::Touched` only what the edit touched: the B-rep's
+        // serial is its own, and every edit ends here, so geometry under these
+        // identities was bound by this edit (lib tests walk every object as well)
+        let touched = (rebind == Rebind::Touched)
+            .then(|| touched_by_edit(b, records.changed_keys(), serial, &slots_before))
+            .flatten();
+        match touched {
+            Some((edges, edgeuses, faces)) => {
+                let r = rebind_owners_of(b, &key_of, &to, &edges, &edgeuses, &faces).map(drop);
+                #[cfg(test)]
+                if r.is_ok() {
+                    let missed = rebind_geometry_owners(b, key_of, to);
+                    assert!(
+                        matches!(missed, Ok(0)),
+                        "geometry left under the edit's identities: {missed:?}"
+                    );
+                }
+                r
+            }
+            None => rebind_geometry_owners(b, key_of, to).map(drop),
+        }
     } else {
         Ok(())
     };
@@ -1450,9 +1494,28 @@ pub(crate) fn rebind_geometry_owners(
     b: &mut Brep,
     session: impl Fn(EntityRef) -> ObjectRef,
     to: impl Fn(EntityRef) -> ObjectRef,
-) -> Result<()> {
+) -> Result<usize> {
     let edges: Vec<EdgeId> = b.edges().ids().collect();
-    for edge in edges {
+    let edgeuses: Vec<EdgeuseId> = b.edgeuses().ids().collect();
+    let faces: Vec<FaceId> = b.faces().ids().collect();
+    rebind_owners_of(b, &session, &to, &edges, &edgeuses, &faces)
+}
+
+/// [`rebind_geometry_owners`] of the given edges, edge uses and faces only (live ones;
+/// others are passed over). Returns how many were rebound.
+fn rebind_owners_of(
+    b: &mut Brep,
+    session: &dyn Fn(EntityRef) -> ObjectRef,
+    to: &dyn Fn(EntityRef) -> ObjectRef,
+    edges: &[EdgeId],
+    edgeuses: &[EdgeuseId],
+    faces: &[FaceId],
+) -> Result<usize> {
+    let mut count = 0;
+    for &edge in edges {
+        if b.edges().get(edge).is_none() {
+            continue;
+        }
         let e = EntityRef::Edge(edge);
         let from = session(e);
         let new_owner = to(e);
@@ -1465,10 +1528,13 @@ pub(crate) fn rebind_geometry_owners(
         });
         if rebound {
             b.set_geometry_owner_key(e, Some(new_owner));
+            count += 1;
         }
     }
-    let edgeuses: Vec<EdgeuseId> = b.edgeuses().ids().collect();
-    for eu in edgeuses {
+    for &eu in edgeuses {
+        if b.edgeuses().get(eu).is_none() {
+            continue;
+        }
         let e = EntityRef::Edgeuse(eu);
         let from = session(e);
         let new_owner = to(e);
@@ -1485,10 +1551,13 @@ pub(crate) fn rebind_geometry_owners(
             });
         if rebound {
             b.set_geometry_owner_key(e, Some(new_owner));
+            count += 1;
         }
     }
-    let faces: Vec<FaceId> = b.faces().ids().collect();
-    for face in faces {
+    for &face in faces {
+        if b.faces().get(face).is_none() {
+            continue;
+        }
         let e = EntityRef::Face(face);
         let from = session(e);
         let new_owner = to(e);
@@ -1502,9 +1571,53 @@ pub(crate) fn rebind_geometry_owners(
         if rebound {
             b.set_geometry_owner_key(e, Some(new_owner));
             b.sync_face_surface_tolerance(face)?;
+            count += 1;
         }
     }
-    Ok(())
+    Ok(count)
+}
+
+/// (not upstream) The edges, edge uses and faces an edit may have bound geometry to
+/// under its identities (`serial`): those whose records it handed out (`changed`) and
+/// those in the slots it made (from `slots_before`). `None` when the records cannot
+/// tell (a bulk access).
+fn touched_by_edit(
+    b: &Brep,
+    changed: Option<&[ObjectKey]>,
+    serial: u64,
+    slots_before: &[usize; KINDS],
+) -> Option<(Vec<EdgeId>, Vec<EdgeuseId>, Vec<FaceId>)> {
+    let mut edges = std::collections::BTreeSet::new();
+    let mut edgeuses = std::collections::BTreeSet::new();
+    let mut faces = std::collections::BTreeSet::new();
+    for &key in changed? {
+        match topology_entity(serial, key) {
+            Some(EntityRef::Edge(x)) => {
+                edges.insert(x);
+            }
+            Some(EntityRef::Edgeuse(x)) => {
+                edgeuses.insert(x);
+            }
+            Some(EntityRef::Face(x)) => {
+                faces.insert(x);
+            }
+            _ => {}
+        }
+    }
+    let slots = slot_counts(b);
+    let new = |kind: usize| {
+        let from = slots_before.get(kind).copied().unwrap_or(0);
+        let to = slots.get(kind).copied().unwrap_or(0);
+        (from..to).map_while(|i| u32::try_from(i).ok())
+    };
+    edges.extend(new(7).map(EdgeId::from_index));
+    edgeuses.extend(new(6).map(EdgeuseId::from_index));
+    faces.extend(new(3).map(FaceId::from_index));
+    Some((
+        edges.into_iter().collect(),
+        edgeuses.into_iter().collect(),
+        faces.into_iter().collect(),
+    ))
 }
 
 /// Runs `edit` for a caller that keeps no notification state of its own (upstream's
@@ -1525,6 +1638,19 @@ pub fn with_kernel_callbacks<R>(
     edit: impl FnOnce(&mut Kernel, &mut Brep, &mut NotifyEnv<'_>) -> Result<R>,
 ) -> Result<R> {
     with_lent_context(k, |k, ctx| kernel_named_edit(k, ctx, b, edit))?
+}
+
+/// [`with_kernel_callbacks`] rebinding only the geometry of the objects the edit
+/// touched ([`Rebind::Touched`]): for an edit that only relinks topology it notifies
+/// (a stitch's vertex glue).
+pub(crate) fn with_kernel_callbacks_touched<R>(
+    k: &mut Kernel,
+    b: &mut Brep,
+    edit: impl FnOnce(&mut Kernel, &mut Brep, &mut NotifyEnv<'_>) -> Result<R>,
+) -> Result<R> {
+    with_lent_context(k, |k, ctx| {
+        kernel_named_edit_rebinding(k, ctx, b, Rebind::Touched, edit)
+    })?
 }
 
 /// What [`edit_brep`] lends its edit: the notification environment and the traversal

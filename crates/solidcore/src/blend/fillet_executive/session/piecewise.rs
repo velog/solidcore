@@ -183,7 +183,7 @@ pub(super) fn normalize_session_owners(
     session: impl Fn(EntityRef) -> ObjectRef,
     to: impl Fn(EntityRef) -> ObjectRef,
 ) -> Result<()> {
-    crate::topology::brep::p3::rebind_geometry_owners(b, session, to)
+    crate::topology::brep::p3::rebind_geometry_owners(b, session, to).map(drop)
 }
 
 /// The identity a B-rep of naming `naming` that records `recorded` for `e` owns `e`'s

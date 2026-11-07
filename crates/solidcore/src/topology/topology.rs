@@ -534,6 +534,12 @@ impl NotifyRecords {
         }
     }
 
+    /// The keys of the records handed out mutably since the last reset (with repeats);
+    /// `None` after a bulk mutable access, when which ones is not known.
+    pub(crate) fn changed_keys(&self) -> Option<&[ObjectKey]> {
+        (!self.all_changed).then_some(self.changed.as_slice())
+    }
+
     /// The arena seeding mark ([`Self::arena_seeded`] field), taken out.
     pub(crate) fn take_arena_seeded(&mut self) -> Option<SeedMark> {
         self.arena_seeded.take()

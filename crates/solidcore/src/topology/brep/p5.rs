@@ -1342,7 +1342,8 @@ fn glue_with_notification_identity(
     body: Option<ObjectRef>,
 ) -> Result<()> {
     let Some(env) = notifications else {
-        return plain_edit(k, b, |k, b, env| {
+        // (a glue only relinks what it notifies: only that geometry is rebound)
+        return crate::topology::brep::p3::with_kernel_callbacks_touched(k, b, |k, b, env| {
             glue_with_notification_identity(k, b, survivor, deleted, wire_edges, Some(env), body)
         });
     };
