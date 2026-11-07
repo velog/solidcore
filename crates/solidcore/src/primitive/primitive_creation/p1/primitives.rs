@@ -346,6 +346,30 @@ fn planar_face(
         )
     })
 }
+/// The cap of a linear sweep over the profile `curves`: with
+/// `fixes.linear_sweep_caps_one_face` the faces of each outer loop and the loops directly
+/// inside it in one construction each (`CreatePlanarFaceWith3DCurves`), else
+/// `CreatePlanarFacesWith3DCurves`, which adds the loops to one face one by one (each
+/// splitting it and classifying against every loop before: a cap with n holes took n^2).
+fn sweep_cap(
+    k: &mut Kernel,
+    b: &mut Brep,
+    region: Option<RegionId>,
+    curves: &[Curve],
+    tolerance: f64,
+) -> Result<()> {
+    if k.fixes.linear_sweep_caps_one_face {
+        with_face_env(k, b, |k, b, fenv| {
+            crate::topology::brep::p8::create_planar_face_with_3d_curves(
+                k, b, region, curves, tolerance, fenv,
+            )
+        })
+        .map(drop)
+    } else {
+        planar_faces(k, b, region, curves, tolerance).map(drop)
+    }
+}
+
 pub(super) fn planar_faces(
     k: &mut Kernel,
     b: &mut Brep,
@@ -1502,7 +1526,7 @@ impl PrimitiveCreation {
                 create_face(k, brep, surface, domain)?;
             }
             if cap_ends {
-                planar_faces(k, brep, self.region(), &curves, brep.tolerance())?;
+                sweep_cap(k, brep, self.region(), &curves, brep.tolerance())?;
                 let mut translation = Axis2Placement::IDENTITY;
                 translation.translate(sweep_dir * distance);
                 let mut end_curves = Vec::new();
@@ -1511,7 +1535,7 @@ impl PrimitiveCreation {
                     copy.transform(k, &translation, None)?;
                     end_curves.push(copy);
                 }
-                planar_faces(k, brep, self.region(), &end_curves, brep.tolerance())?;
+                sweep_cap(k, brep, self.region(), &end_curves, brep.tolerance())?;
             }
             stitch(k, brep)?;
             brep.set_editing_enabled(false);
