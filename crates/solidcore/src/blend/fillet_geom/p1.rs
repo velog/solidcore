@@ -3120,6 +3120,7 @@ fn point_3d_classify(
             tgt_loops_only: target_loops_only,
             tgt_loops: target_loops,
             uv_space_okay: ok_in_uv_space,
+            coordinates_checked: false,
         },
     );
     match r {

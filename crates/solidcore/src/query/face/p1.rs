@@ -366,6 +366,11 @@ pub struct Point3dClassifyOptions<'a> {
     pub tgt_loops: Option<&'a [LoopId]>,
     /// `bUVSpaceOkay`: UV-space classification may be tried when the 3D one is doubtful.
     pub uv_space_okay: bool,
+    /// (not upstream) The caller has shown that no coordinate of the face's geometry is
+    /// beyond the HANG-29 bound (`check_face_coordinates`), so the per-call check is left
+    /// out: the faces `CreateFacesWithCurves` builds from curves it checked once
+    /// (`topology::brep::p8`), each classified as it gains a loop.
+    pub coordinates_checked: bool,
 }
 
 impl Default for Point3dClassifyOptions<'_> {
@@ -375,6 +380,7 @@ impl Default for Point3dClassifyOptions<'_> {
             tgt_loops_only: false,
             tgt_loops: None,
             uv_space_okay: true,
+            coordinates_checked: false,
         }
     }
 }
@@ -423,6 +429,15 @@ impl ClassGeometry<EntityRef> for BrepGeometry<'_> {
             _ => None,
         }
     }
+}
+
+/// (lib tests) The HANG-29 check of `f` passes, as a caller's `coordinates_checked` says.
+#[cfg(test)]
+fn coordinates_check_holds(k: &Kernel, b: &Brep, f: FaceId) {
+    assert!(
+        crate::query::face::p3::check_face_coordinates(k, b, f, OP_POINT).is_ok(),
+        "coordinates_checked on a face beyond the HANG-29 bound"
+    );
 }
 
 /// The UV start of the first solution of a point solve.
@@ -475,7 +490,14 @@ pub fn point_3d_classify(
 ) -> Result<()> {
     let uv_domain = fp2::uv_domain(b, f)?;
     // HANG-29: refuse coordinates the point classification cannot handle
-    crate::query::face::p3::check_face_coordinates(k, b, f, OP_POINT)?;
+    if !opts.coordinates_checked {
+        crate::query::face::p3::check_face_coordinates(k, b, f, OP_POINT)?;
+    }
+    // (lib tests check anyway: the caller's check must hold)
+    #[cfg(test)]
+    if opts.coordinates_checked {
+        coordinates_check_holds(k, b, f);
+    }
 
     // init output - SM_PC_UNKNOWN is used for OUTSIDE the face's trim boundary
     pc.set_class_object(PointClassType::Unknown, None);

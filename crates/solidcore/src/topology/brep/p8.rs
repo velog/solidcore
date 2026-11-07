@@ -528,6 +528,12 @@ pub fn create_faces_with_curves(
         // (upstream reads pSurface->GetNaturalUVDomain() before its null check)
         let surface = surface.ok_or_else(|| invalid("no surface (upstream dereferences null)"))?;
         let natural = surface.natural_uv_domain_with_nurb(k)?;
+        // (not upstream) every face made here is bounded by these curves (exact copies, on
+        // their natural intervals) and the surface over its natural domain: on a plane,
+        // when their boxes are well inside the HANG-29 bound, no face's can be beyond it,
+        // and the face search below need not check each face's coordinates again (it
+        // walked every edge of the face holding all earlier loops: quadratic)
+        let coordinates_checked = coordinates_well_inside(k, &surface, &natural, &curves_3d);
         let big = create_face_in_region_from_surface(k, b, region, Some(surface), &natural, fenv)?;
         out.shell = big.shell;
         let new_face = big.face;
@@ -588,7 +594,10 @@ pub fn create_faces_with_curves(
                                     tol,
                                     false,
                                     &mut pc,
-                                    qf1::Point3dClassifyOptions::default(),
+                                    qf1::Point3dClassifyOptions {
+                                        coordinates_checked,
+                                        ..qf1::Point3dClassifyOptions::default()
+                                    },
                                 )?;
                                 if pc.point_class() == PointClassType::Face {
                                     found = Some(f1);
@@ -719,6 +728,50 @@ pub fn create_faces_with_curves(
         out.faces = faces.into_iter().flatten().collect();
         Ok(out)
     })
+}
+
+/// (not upstream) Whether `surface` is a plane and the loose boxes of every curve of
+/// `curves` (over its natural interval) and of the plane over `domain` have only finite
+/// coordinates a tenth of the HANG-29 bound or less, so that no face bounded by them, and
+/// no edge or vertex on them, has a coordinate beyond it (`check_face_coordinates`). A
+/// box that cannot be computed answers `false`.
+fn coordinates_well_inside(
+    k: &Kernel,
+    surface: &Surface,
+    domain: &Extent2d,
+    curves: &[Option<Curve>],
+) -> bool {
+    use crate::nurbs::b_spline_curve::BoundingBoxRequest;
+    use crate::surface::surface::SurfaceKind;
+    let limit = crate::limits::MAX_COORDINATE_MAGNITUDE / 10.0;
+    let inside = |e: &crate::geom::extent3d::Extent3d| {
+        (0..3).all(|i| {
+            let (lo, hi) = (e.min_at(i), e.max_at(i));
+            lo <= hi && lo.is_finite() && hi.is_finite() && lo.abs() <= limit && hi.abs() <= limit
+        })
+    };
+    if !matches!(surface.kind(), SurfaceKind::Plane(_)) {
+        return false;
+    }
+    let req = BoundingBoxRequest {
+        normal: true,
+        pseudo: false,
+        polar: false,
+    };
+    let curves_inside = curves.iter().all(|c| {
+        c.as_ref().is_some_and(|c| {
+            c.calculate_bounding_box(k, &c.natural_interval(), req, true)
+                .ok()
+                .and_then(|b| b.normal)
+                .is_some_and(|b| inside(&b))
+        })
+    });
+    curves_inside
+        && surface
+            .calculate_bounding_box(k, domain, [true, false, false], true)
+            .ok()
+            .and_then(|b| b.normal_box)
+            .is_some_and(|b| inside(&b))
 }
 
 // ---- MakeFacesWithCurves --------------------------------------------------------------
