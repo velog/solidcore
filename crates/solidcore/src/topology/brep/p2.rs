@@ -832,6 +832,40 @@ impl ArenaNotifyState {
         }
     }
 
+    /// Makes this state, left by an earlier edit of `b`, what [`Self::new`] of `b` gives
+    /// for the next one: every record the edit changed made default again, an empty
+    /// attribute store, and a record for each object of `b` at an arena index from
+    /// `seeded_to` on (indices below were all seeded: `seeded_to` is this state's, from
+    /// [`super::p3::slot_counts`] at its [`Self::new`]). Objects the edit removed would
+    /// leave records [`Self::new`] does not make; then this state is made anew. For a
+    /// run of face constructions in one B-rep (a sweep's walls), where a fresh state per
+    /// face is quadratic.
+    pub(crate) fn renew(&mut self, b: &Brep, seeded_to: &mut [usize; super::p3::KINDS]) {
+        use crate::topology::loopuse::notify_ref;
+        self.records.reset_changed();
+        self.attributes = AttributeStore::default();
+        let live = super::p3::seed_arena_from(&mut self.records, b, seeded_to);
+        let own = notify_ref(EntityRef::Brep(BrepId::from_index(0))).key;
+        self.records.or_default(own);
+        // (an edit through `topology::brep::p3` also seeds the B-rep's own key, which
+        // its next edit seeds again whether or not this state has it)
+        let other = brep_ref(b).key;
+        let extra = usize::from(other != own && self.records.contains_key(&other));
+        if self.records.len() != live + 1 + extra {
+            *self = Self::new(b);
+            *seeded_to = super::p3::slot_counts(b);
+        }
+        // (every lib test that sweeps checks the renewed state against a fresh one)
+        #[cfg(test)]
+        {
+            let mut ours = self.records.clone();
+            if extra == 1 {
+                ours.remove(&other);
+            }
+            assert_eq!(*ours, *Self::new(b).records, "renewed notify state");
+        }
+    }
+
     /// [`Self::with_attributes_of`] reusing the records of an earlier state
     /// ([`Self::into_records`]): they end exactly as [`Self::new`] makes them, a default
     /// record for every object of `b` and the B-rep and no other, but only the records

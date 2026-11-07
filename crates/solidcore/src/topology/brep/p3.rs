@@ -1045,7 +1045,7 @@ pub(crate) fn with_caller_identities_for<R>(
 }
 
 /// The kinds of topology object, in [`entities`]' order.
-const KINDS: usize = 10;
+pub(crate) const KINDS: usize = 10;
 
 /// The object of kind `kind` (in [`entities`]' order) at arena index `index`.
 fn kind_entity(kind: usize, index: u32) -> EntityRef {
@@ -1083,8 +1083,34 @@ fn is_live(b: &Brep, kind: usize, index: u32) -> bool {
     }
 }
 
+/// (not upstream) Gives `records` a default record under the arena identity
+/// ([`crate::topology::loopuse::notify_ref`]) for every live object of `b` at an arena
+/// index from `seeded_to` on, per kind, and moves `seeded_to` to the slot counts.
+/// Returns the number of live objects of `b`. For a caller that keeps one
+/// [`p2::ArenaNotifyState`] over a run of edits that add objects
+/// (`p2::ArenaNotifyState::renew`).
+pub(crate) fn seed_arena_from(
+    records: &mut topo::NotifyRecords,
+    b: &Brep,
+    seeded_to: &mut [usize; KINDS],
+) -> usize {
+    for (kind, (slots, from)) in slot_counts(b)
+        .into_iter()
+        .zip(seeded_to.iter_mut())
+        .enumerate()
+    {
+        for index in (*from..slots).map_while(|i| u32::try_from(i).ok()) {
+            if is_live(b, kind, index) {
+                records.or_default(crate::topology::loopuse::notify_ref(kind_entity(kind, index)).key);
+            }
+        }
+        *from = slots.max(*from);
+    }
+    live_counts(b).into_iter().sum()
+}
+
 /// The slot count of each kind, removed slots included (the next index of each).
-fn slot_counts(b: &Brep) -> [usize; KINDS] {
+pub(crate) fn slot_counts(b: &Brep) -> [usize; KINDS] {
     [
         b.regions().slot_count(),
         b.shells().slot_count(),

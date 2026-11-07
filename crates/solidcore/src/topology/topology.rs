@@ -484,19 +484,7 @@ impl NotifyRecords {
     /// one ascending walk of both.
     pub(crate) fn reset_to_keys(&mut self, keys: &[ObjectKey]) {
         self.progress.clear();
-        if self.all_changed {
-            for record in self.map.values_mut() {
-                *record = Topology::default();
-            }
-        } else {
-            for key in &self.changed {
-                if let Some(record) = self.map.get_mut(key) {
-                    *record = Topology::default();
-                }
-            }
-        }
-        self.changed.clear();
-        self.all_changed = false;
+        self.reset_changed();
         let (mut gone, mut new) = (Vec::new(), Vec::new());
         let mut wanted = keys.iter().peekable();
         for key in self.map.keys() {
@@ -514,6 +502,24 @@ impl NotifyRecords {
         for key in new {
             self.map.insert(key, Topology::default());
         }
+    }
+
+    /// Makes every record handed out mutably since the last reset (or every record,
+    /// after a bulk access) default again, keeping the keys and the seeding progress.
+    pub(crate) fn reset_changed(&mut self) {
+        if self.all_changed {
+            for record in self.map.values_mut() {
+                *record = Topology::default();
+            }
+        } else {
+            for key in &self.changed {
+                if let Some(record) = self.map.get_mut(key) {
+                    *record = Topology::default();
+                }
+            }
+        }
+        self.changed.clear();
+        self.all_changed = false;
     }
 
     /// The records and the progress kept for `id` on the B-rep value `instance` (made

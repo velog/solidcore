@@ -120,7 +120,42 @@ fn with_face_env<T>(
         &mut crate::topology::brep::p8::FaceBuildEnv<'_, '_>,
     ) -> Result<T>,
 ) -> Result<T> {
-    let mut state = crate::topology::brep::p2::ArenaNotifyState::new(b);
+    with_face_env_in(&mut FaceStates::default(), k, b, body)
+}
+
+/// (not upstream) The notification state of a run of face constructions in one B-rep
+/// (a linear sweep's walls and caps): each construction sees what a fresh
+/// [`ArenaNotifyState`](crate::topology::brep::p2::ArenaNotifyState) of the B-rep gives
+/// ([`ArenaNotifyState::renew`](crate::topology::brep::p2::ArenaNotifyState::renew)),
+/// without seeding every object again per face (quadratic: 1.6 s of the walls of a
+/// plate with 1024 holes).
+#[derive(Default)]
+struct FaceStates {
+    state: Option<crate::topology::brep::p2::ArenaNotifyState>,
+    seeded_to: [usize; crate::topology::brep::p3::KINDS],
+}
+
+/// [`with_face_env`] over the run's state `states`.
+fn with_face_env_in<T>(
+    states: &mut FaceStates,
+    k: &mut Kernel,
+    b: &mut Brep,
+    body: impl FnOnce(
+        &mut Kernel,
+        &mut Brep,
+        &mut crate::topology::brep::p8::FaceBuildEnv<'_, '_>,
+    ) -> Result<T>,
+) -> Result<T> {
+    let state = match &mut states.state {
+        Some(state) => {
+            state.renew(b, &mut states.seeded_to);
+            state
+        }
+        none => {
+            states.seeded_to = crate::topology::brep::p3::slot_counts(b);
+            none.insert(crate::topology::brep::p2::ArenaNotifyState::new(b))
+        }
+    };
     let mut env = state.env(None);
     let mut marks = crate::topology::topology_traverser::Marks::default();
     let this_face =
@@ -181,7 +216,19 @@ pub(super) fn planar_faces(
     curves: &[Curve],
     tolerance: f64,
 ) -> Result<Vec<FaceId>> {
-    with_face_env(k, b, |k, b, fenv| {
+    planar_faces_in(&mut FaceStates::default(), k, b, region, curves, tolerance)
+}
+
+/// [`planar_faces`] in a run of face constructions ([`FaceStates`]).
+fn planar_faces_in(
+    states: &mut FaceStates,
+    k: &mut Kernel,
+    b: &mut Brep,
+    region: Option<RegionId>,
+    curves: &[Curve],
+    tolerance: f64,
+) -> Result<Vec<FaceId>> {
+    with_face_env_in(states, k, b, |k, b, fenv| {
         crate::topology::brep::p8::create_planar_faces_with_3d_curves(
             k, b, region, curves, tolerance, fenv,
         )
@@ -192,14 +239,6 @@ fn cone_face(k: &mut Kernel, b: &mut Brep, surface: &Cone, domain: Extent2d) -> 
 }
 fn torus_face(k: &mut Kernel, b: &mut Brep, surface: &Torus, domain: Extent2d) -> Result<FaceId> {
     create_face_id(k, b, Surface::from(surface.clone()), domain)
-}
-fn extrusion_face(
-    k: &mut Kernel,
-    b: &mut Brep,
-    surface: &crate::surface::surf_of_extrusion::p1::SurfOfExtrusion,
-    domain: Extent2d,
-) -> Result<()> {
-    create_face(k, b, Surface::from(surface.clone()), domain)
 }
 fn trimmed_face(
     k: &mut Kernel,
@@ -233,7 +272,18 @@ fn create_face_id(
     surface: Surface,
     domain: Extent2d,
 ) -> Result<FaceId> {
-    with_face_env(k, b, |k, b, fenv| {
+    create_face_id_in(&mut FaceStates::default(), k, b, surface, domain)
+}
+
+/// [`create_face_id`] in a run of face constructions ([`FaceStates`]).
+fn create_face_id_in(
+    states: &mut FaceStates,
+    k: &mut Kernel,
+    b: &mut Brep,
+    surface: Surface,
+    domain: Extent2d,
+) -> Result<FaceId> {
+    with_face_env_in(states, k, b, |k, b, fenv| {
         crate::topology::brep::p8::create_face_from_surface(k, b, Some(surface), &domain, fenv)
     })
 }
@@ -1092,6 +1142,7 @@ impl PrimitiveCreation {
         let p = k.fixes.sweep_statuses_pass_on;
         let previous = k.context.doing_boolean();
         k.context.set_doing_boolean(true);
+        let mut states = FaceStates::default();
         let result = (|| {
             // Every surface and the end cap use this unit direction and a positive
             // length, so they meet. A negative distance sweeps against the direction.
@@ -1161,7 +1212,10 @@ impl PrimitiveCreation {
                                 p,
                             )?;
                             let domain = cylinder.rev.base().natural_uv_domain();
-                            ignore_or_pass_on(cone_face(k, brep, &cylinder, domain), p)?;
+                            ignore_or_pass_on(
+                                create_face_id_in(&mut states, k, brep, Surface::from(cylinder.clone()), domain),
+                                p,
+                            )?;
                             continue;
                         }
                     }
@@ -1176,7 +1230,10 @@ impl PrimitiveCreation {
                             arc_sweep_cylinder(k, frame, radius, (start, end), sweep_dir, distance)?
                         {
                             let domain = cylinder.rev.base().natural_uv_domain();
-                            ignore_or_pass_on(cone_face(k, brep, &cylinder, domain), p)?;
+                            ignore_or_pass_on(
+                                create_face_id_in(&mut states, k, brep, Surface::from(cylinder.clone()), domain),
+                                p,
+                            )?;
                             continue;
                         }
                     }
@@ -1189,15 +1246,18 @@ impl PrimitiveCreation {
                     let mut extrusion = SurfOfExtrusion::create_canonical(k, copy, sweep_dir)?;
                     ignore_or_pass_on(extrusion.adjust_step_uv_domain(k, &analytic_domain), p)?;
                     let domain = extrusion.base().natural_uv_domain();
-                    ignore_or_pass_on(extrusion_face(k, brep, &extrusion, domain), p)?;
+                    ignore_or_pass_on(
+                        create_face_id_in(&mut states, k, brep, Surface::from(extrusion.clone()), domain),
+                        p,
+                    )?;
                     continue;
                 };
                 let domain = surface.natural_uv_domain_with_nurb(k)?;
-                ignore_or_pass_on(create_face(k, brep, surface, domain), p)?;
+                ignore_or_pass_on(create_face_id_in(&mut states, k, brep, surface, domain), p)?;
             }
             if cap_ends {
                 ignore_or_pass_on(
-                    planar_faces(k, brep, self.region(), &curves, brep.tolerance()),
+                    planar_faces_in(&mut states, k, brep, self.region(), &curves, brep.tolerance()),
                     p,
                 )?;
                 let mut translation = Axis2Placement::IDENTITY;
@@ -1209,7 +1269,7 @@ impl PrimitiveCreation {
                     end_curves.push(copy);
                 }
                 ignore_or_pass_on(
-                    planar_faces(k, brep, self.region(), &end_curves, brep.tolerance()),
+                    planar_faces_in(&mut states, k, brep, self.region(), &end_curves, brep.tolerance()),
                     p,
                 )?;
             }
