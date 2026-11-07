@@ -1208,9 +1208,25 @@ fn point_classify_with_topology(
     // Get tolerance
     let tol_3d = max2(face_tolerance, pc.tolerance());
 
+    // Opt-in (`face_classify_skips_loops_apart`): on a plane, an inner loop whose box
+    // the point lies outside of is outside without the walk.
+    let skip_apart = k.fixes.face_classify_skips_loops_apart
+        && matches!(surface.kind(), SurfaceKind::Plane(_));
+
     // For every loop: check containment
     for l in loops {
         let is_outer = Some(l) == outer_loop;
+        if skip_apart && !is_outer && loop_apart(k, b, l, surf_pt, tol_3d)? {
+            // (lib tests walk the loop anyway: the walk must find the point outside)
+            #[cfg(test)]
+            {
+                let walked = contains_uv_point_with_topology(k, b, l, Some(surface), uv, tol_3d)?;
+                assert_eq!(walked.containment, PointContainment::Outside, "loop apart");
+                LOOPS_SKIPPED.with(|n| n.set(n.get() + 1));
+            }
+            type_inner = PointContainment::Outside;
+            continue;
+        }
 
         // check TargetPoint containment
         let UvContainment {
@@ -1271,6 +1287,56 @@ fn point_classify_with_topology(
         code: SM_ERR,
         entity: Some(this),
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The inner loops [`point_classify`] passed over by their box on this thread.
+    pub(crate) static LOOPS_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// (not upstream: `face_classify_skips_loops_apart`) Whether `point` lies outside the box
+/// of loop `l`'s edges, each edge's curve box grown by its tolerance and the whole by
+/// `tol_3d`, with every edge use of the loop holding its UV trim curve (its own or its
+/// mate's), so that [`contains_uv_point_with_topology`] would make none. `false` when
+/// any of it cannot be told (a vertex loop, an edge without curve or box).
+fn loop_apart(k: &Kernel, b: &Brep, l: LoopId, point: Point3, tol_3d: f64) -> Result<bool> {
+    use crate::nurbs::b_spline_curve::BoundingBoxRequest;
+    let Some(lu) = b.loop_(l)?.loopuse else {
+        return Ok(false);
+    };
+    let eus = eu1::loopuse_edgeuses(b, lu)?;
+    if eus.is_empty() {
+        return Ok(false);
+    }
+    let req = BoundingBoxRequest {
+        normal: true,
+        pseudo: false,
+        polar: false,
+    };
+    let mut bounds = Extent3d::new();
+    for eu in eus {
+        if eu1::uv_trim_curve(b, eu)?.0.is_none() {
+            return Ok(false);
+        }
+        let Some(e) = b.edgeuse(eu)?.edge else {
+            return Ok(false);
+        };
+        let edge = b.edge(e)?;
+        let Some(curve) = edge.curve.as_ref() else {
+            return Ok(false);
+        };
+        let Some(mut edge_box) = curve
+            .calculate_bounding_box(k, &edge.interval, req, true)
+            .ok()
+            .and_then(|boxes| boxes.normal)
+        else {
+            return Ok(false);
+        };
+        edge_box.expand_absolute(edge.tolerance);
+        bounds = bounds.union(&edge_box);
+    }
+    Ok(!bounds.contains_point(point, tol_3d))
 }
 
 /// The on-boundary exit of [`point_classify`]: the edge, its parameter, the gap from

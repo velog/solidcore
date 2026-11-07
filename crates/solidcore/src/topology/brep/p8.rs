@@ -1445,6 +1445,70 @@ mod tests {
         }
     }
 
+    /// A plate with a 4 x 4 grid of square holes, by `CreatePlanarFacesWith3DCurves`, with
+    /// `face_classify_skips_loops_apart` off and on: the same faces, each with the same
+    /// loops through the same vertices, and the classifications do pass over loops (each
+    /// one passed over is walked anyway in lib tests and found outside).
+    #[test]
+    fn loops_apart_are_skipped_with_the_same_faces() {
+        let square = |x: f64, y: f64, s: f64| {
+            vec![
+                line([x, y, 0.0], [x + s, y, 0.0]),
+                line([x + s, y, 0.0], [x + s, y + s, 0.0]),
+                line([x + s, y + s, 0.0], [x, y + s, 0.0]),
+                line([x, y + s, 0.0], [x, y, 0.0]),
+            ]
+        };
+        let mut curves = square(0.0, 0.0, 10.0);
+        for i in 0..4 {
+            for j in 0..4 {
+                curves.extend(square(1.0 + 2.2 * f64::from(i), 1.0 + 2.2 * f64::from(j), 1.0));
+            }
+        }
+        let shape = |skip: bool| {
+            let before = crate::query::face::p2::LOOPS_SKIPPED.with(std::cell::Cell::get);
+            let (r, b) = with_brep(|k, b, fenv| {
+                k.fixes.face_classify_skips_loops_apart = skip;
+                create_planar_faces_with_3d_curves(k, b, None, &curves, 1e-6, fenv)
+            });
+            let skipped = crate::query::face::p2::LOOPS_SKIPPED.with(std::cell::Cell::get) - before;
+            let mut faces: Vec<Vec<Vec<[i64; 3]>>> = r
+                .unwrap()
+                .into_iter()
+                .map(|f| {
+                    let mut loops: Vec<Vec<[i64; 3]>> = face2::loops(&b, f, false, None)
+                        .unwrap()
+                        .into_iter()
+                        .map(|l| {
+                            let mut at: Vec<[i64; 3]> = loopuse::loop_vertices(&b, l)
+                                .unwrap()
+                                .into_iter()
+                                .flatten()
+                                .map(|v| {
+                                    let p = b.vertex(v).unwrap().point;
+                                    [p.x, p.y, p.z].map(|c| (c * 1e6).round() as i64)
+                                })
+                                .collect();
+                            at.sort_unstable();
+                            at
+                        })
+                        .collect();
+                    loops.sort();
+                    loops
+                })
+                .collect();
+            faces.sort();
+            (faces, skipped)
+        };
+        let (plain, none) = shape(false);
+        let (fast, skipped) = shape(true);
+        assert_eq!(none, 0);
+        assert!(skipped > 0, "no loop passed over");
+        assert_eq!(plain, fast);
+        assert_eq!(plain.len(), 1, "one face");
+        assert_eq!(plain[0].len(), 17, "the outline and 16 holes");
+    }
+
     #[test]
     fn a_square_reaches_the_face_construction_and_restores_editing() {
         let square = vec![
