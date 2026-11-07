@@ -809,11 +809,36 @@ pub fn transfer_children(
             ShellMembers::Faceuses(list) if source != recipient => list.len(),
             _ => 0,
         };
-        for faceuse in faceuses {
-            if brep.faceuse(faceuse)?.shell != Some(source) {
-                return Err(invalid_members());
+        // (not upstream) every face use of the source moves to the recipient's tail in
+        // the source's order and the source is left without members: when all of them
+        // are the source's own, they move as one list (removing each from the source by
+        // a search was quadratic in its size); otherwise one by one, failing where
+        // upstream does
+        let all_own = source != recipient
+            && faceuses
+                .iter()
+                .map(|&f| brep.faceuse(f).map(|r| r.shell == Some(source)))
+                .collect::<Result<Vec<bool>>>()?
+                .into_iter()
+                .all(|own| own);
+        if all_own {
+            brep.shell_mut(source)?.members = ShellMembers::Empty;
+            let target = &mut brep.shell_mut(recipient)?.members;
+            match target {
+                ShellMembers::Empty => *target = ShellMembers::Faceuses(faceuses.clone()),
+                ShellMembers::Faceuses(list) => list.extend(&faceuses),
+                _ => return Err(invalid_members()),
             }
-            remove_and_post_insert(brep, faceuse, source, recipient)?;
+            for &faceuse in &faceuses {
+                brep.faceuse_mut(faceuse)?.shell = Some(recipient);
+            }
+        } else {
+            for faceuse in faceuses {
+                if brep.faceuse(faceuse)?.shell != Some(source) {
+                    return Err(invalid_members());
+                }
+                remove_and_post_insert(brep, faceuse, source, recipient)?;
+            }
         }
         // Self-transfer clears the shell head but leaves this face-use cycle
         // connected. Preserve those native links independently of the head.
@@ -830,39 +855,58 @@ pub fn transfer_children(
 /// that holds every face so far relinked it all on each merge: quadratic. Lib tests
 /// compare the result with a full relink.
 fn relink_appended(brep: &mut Brep, owner: ShellId, kept: usize) -> Result<()> {
-    let members = brep.shell(owner)?.get_faceuses()?;
-    let (Some(&head), Some(&last_kept)) = (
-        members.first(),
-        kept.checked_sub(1).and_then(|i| members.get(i)),
-    ) else {
+    // (only the ends of the list and the appended members are read: copying the whole
+    // list per merge was itself quadratic)
+    let shell = brep.shell(owner)?;
+    let ShellMembers::Faceuses(list) = &shell.members else {
+        return refresh_faceuse_sibling_links(brep, owner);
+    };
+    if !shell.is_faceuse_shell() {
+        return refresh_faceuse_sibling_links(brep, owner);
+    }
+    let (Some(&head), Some(&last_kept)) =
+        (list.first(), kept.checked_sub(1).and_then(|i| list.get(i)))
+    else {
+        return refresh_faceuse_sibling_links(brep, owner);
+    };
+    let appended: Vec<FaceuseId> = list
+        .get(kept..)
+        .map(<[FaceuseId]>::to_vec)
+        .unwrap_or_default();
+    let Some(&tail) = appended.last() else {
         return refresh_faceuse_sibling_links(brep, owner);
     };
     let links = |brep: &Brep, f: FaceuseId| brep.faceuse(f).map(|r| r.sibling_links);
-    let in_step = kept < members.len()
-        && links(brep, head)?.is_some_and(|(_, prev)| prev == Some(last_kept))
+    let in_step = links(brep, head)?.is_some_and(|(_, prev)| prev == Some(last_kept))
         && links(brep, last_kept)?.is_some_and(|(next, _)| next == Some(head));
     if !in_step {
         return refresh_faceuse_sibling_links(brep, owner);
     }
-    #[cfg(test)]
-    let before = members
-        .iter()
-        .map(|&f| links(brep, f))
-        .collect::<Result<Vec<_>>>()?;
-    let n = members.len();
-    let at = |i: usize| members.get(i % n).copied().ok_or(invalid_members());
-    // the last kept member and each appended one: their next and previous
-    for i in (kept - 1)..n {
-        let next = at(i + 1)?;
-        let previous = at(i + n - 1)?;
-        brep.faceuse_mut(at(i)?)?.sibling_links = Some((Some(next), Some(previous)));
+    // the last kept member, then each appended one, then back to the head
+    let last_kept_previous = if last_kept == head {
+        tail
+    } else {
+        links(brep, last_kept)?
+            .and_then(|(_, prev)| prev)
+            .ok_or(invalid_members())?
+    };
+    let mut run = Vec::with_capacity(appended.len() + 1);
+    run.push(last_kept);
+    run.extend(&appended);
+    for (k, &member) in run.iter().enumerate() {
+        let next = run.get(k + 1).copied().unwrap_or(head);
+        let previous = match k.checked_sub(1).and_then(|p| run.get(p)) {
+            Some(&p) => p,
+            None => last_kept_previous,
+        };
+        brep.faceuse_mut(member)?.sibling_links = Some((Some(next), Some(previous)));
     }
-    // the head: its previous is the new last member
-    let tail = at(n - 1)?;
+    // the head's previous is the new tail (its next stays, or is the first appended)
     let head_next = links(brep, head)?.and_then(|(next, _)| next);
     brep.faceuse_mut(head)?.sibling_links = Some((head_next, Some(tail)));
     #[cfg(test)]
     {
+        let members = brep.shell(owner)?.get_faceuses()?;
         let ours = members
             .iter()
             .map(|&f| links(brep, f))
@@ -875,7 +919,7 @@ fn relink_appended(brep: &mut Brep, owner: ShellId, kept: usize) -> Result<()> {
             .collect::<Result<Vec<_>>>()?;
         assert_eq!(
             ours, fresh,
-            "appended face uses relinked like a full relink (before {before:?})"
+            "appended face uses relinked like a full relink"
         );
     }
     Ok(())
