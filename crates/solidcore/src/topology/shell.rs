@@ -805,6 +805,10 @@ pub fn transfer_children(
             target.shell_type = ShellType::Faceuse;
             target.members = ShellMembers::Empty;
         }
+        let kept = match &brep.shell(recipient)?.members {
+            ShellMembers::Faceuses(list) if source != recipient => list.len(),
+            _ => 0,
+        };
         for faceuse in faceuses {
             if brep.faceuse(faceuse)?.shell != Some(source) {
                 return Err(invalid_members());
@@ -813,9 +817,68 @@ pub fn transfer_children(
         }
         // Self-transfer clears the shell head but leaves this face-use cycle
         // connected. Preserve those native links independently of the head.
-        refresh_faceuse_sibling_links(brep, recipient)?;
+        relink_appended(brep, recipient, kept)?;
     }
     clear_shell_members(brep, source)
+}
+
+/// (not upstream) [`refresh_faceuse_sibling_links`] of `owner` after face uses were
+/// appended to its first `kept` members: only the appended ones, the last kept one and
+/// the head are linked again when the kept ring's ends are in step (the head's previous
+/// is the last kept member, whose next is the head), as the rest of the ring is then
+/// unchanged; otherwise, or with nothing kept, the whole ring. A shell merging into one
+/// that holds every face so far relinked it all on each merge: quadratic. Lib tests
+/// compare the result with a full relink.
+fn relink_appended(brep: &mut Brep, owner: ShellId, kept: usize) -> Result<()> {
+    let members = brep.shell(owner)?.get_faceuses()?;
+    let (Some(&head), Some(&last_kept)) = (
+        members.first(),
+        kept.checked_sub(1).and_then(|i| members.get(i)),
+    ) else {
+        return refresh_faceuse_sibling_links(brep, owner);
+    };
+    let links = |brep: &Brep, f: FaceuseId| brep.faceuse(f).map(|r| r.sibling_links);
+    let in_step = kept < members.len()
+        && links(brep, head)?.is_some_and(|(_, prev)| prev == Some(last_kept))
+        && links(brep, last_kept)?.is_some_and(|(next, _)| next == Some(head));
+    if !in_step {
+        return refresh_faceuse_sibling_links(brep, owner);
+    }
+    #[cfg(test)]
+    let before = members
+        .iter()
+        .map(|&f| links(brep, f))
+        .collect::<Result<Vec<_>>>()?;
+    let n = members.len();
+    let at = |i: usize| members.get(i % n).copied().ok_or(invalid_members());
+    // the last kept member and each appended one: their next and previous
+    for i in (kept - 1)..n {
+        let next = at(i + 1)?;
+        let previous = at(i + n - 1)?;
+        brep.faceuse_mut(at(i)?)?.sibling_links = Some((Some(next), Some(previous)));
+    }
+    // the head: its previous is the new last member
+    let tail = at(n - 1)?;
+    let head_next = links(brep, head)?.and_then(|(next, _)| next);
+    brep.faceuse_mut(head)?.sibling_links = Some((head_next, Some(tail)));
+    #[cfg(test)]
+    {
+        let ours = members
+            .iter()
+            .map(|&f| links(brep, f))
+            .collect::<Result<Vec<_>>>()?;
+        let mut full = brep.clone_standing_for_self()?;
+        refresh_faceuse_sibling_links(&mut full, owner)?;
+        let fresh = members
+            .iter()
+            .map(|&f| full.faceuse(f).map(|r| r.sibling_links))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(
+            ours, fresh,
+            "appended face uses relinked like a full relink (before {before:?})"
+        );
+    }
+    Ok(())
 }
 
 // `source->Remove(faceuse)` then `recipient->PostInsert(faceuse)`
