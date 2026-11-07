@@ -476,24 +476,28 @@ pub fn wire_edges(kernel: &mut Kernel, brep: &Brep, id: ShellId) -> Result<Vec<E
         return Ok(output);
     }
     if shell.is_wire_shell() {
-        with_mark_lock(kernel, ALL_MARKS, |kernel, mark| {
+        // (not upstream) the walk's marks are its own (a fresh store, read by nothing
+        // after it): sets of the visited vertices and edges, in place of a `Marks` whose
+        // tables grow to the largest arena index marked (a wire of a large B-rep zeroed
+        // a megabyte per call: 10 082 calls took 7.3 s in one cap of 5041 holes). The
+        // mark is still taken and given back as upstream does.
+        with_mark_lock(kernel, ALL_MARKS, |_, _| {
             let first = shell.wire_edge(brep)?.ok_or(invalid_members())?;
-            let mut marks = Marks::default();
+            let mut seen_vertices = std::collections::BTreeSet::new();
+            let mut seen_edges = std::collections::BTreeSet::new();
             let mut stack = vec![first];
             while let Some(edge) = stack.pop() {
                 for vertex in crate::topology::edge::vertices(brep, edge, None)? {
                     // Upstream marks every listed vertex: a NULL start vertex is a
                     // NULL dereference.
                     let vertex = vertex.ok_or_else(|| SolidError::null_pointer(WIRE_OP))?;
-                    if marks.is_marked(kernel, Entity::Vertex(vertex), mark) {
+                    if !seen_vertices.insert(vertex) {
                         continue;
                     }
-                    marks.mark(kernel, Entity::Vertex(vertex), mark);
                     for adjacent in crate::topology::vertex::edges(brep, vertex, None)? {
-                        if marks.is_marked(kernel, Entity::Edge(adjacent), mark) {
+                        if !seen_edges.insert(adjacent) {
                             continue;
                         }
-                        marks.mark(kernel, Entity::Edge(adjacent), mark);
                         output.push(adjacent);
                         stack.push(adjacent);
                     }
