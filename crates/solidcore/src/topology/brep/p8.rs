@@ -774,6 +774,51 @@ fn coordinates_well_inside(
             .is_some_and(|b| inside(&b))
 }
 
+/// (not upstream) Starts every loop of `faces` where `CreatePlanarFacesWith3DCurves` starts
+/// it: at the edge that closed the loop (its last curve), both loop uses of the loop at
+/// that edge, the primary running on from it as before and the mate back from it.
+/// `CreatePlanarFaceWith3DCurves` starts them at the first curve; what is counted round a
+/// loop from its start (a sheet's base edges `E<k>`) then differs. Only the start
+/// changes; the cached loop records are refreshed.
+///
+/// # Errors
+///
+/// [`SolidError::InvalidInput`] for a loop use without edge uses that names an edge use
+/// start, or a mate without the start's edge; those of the topology reads.
+pub(crate) fn start_loops_at_their_closing_edge(b: &mut Brep, faces: &[FaceId]) -> Result<()> {
+    use crate::topology::LoopuseStart;
+    for &f in faces {
+        for l in face2::loops(b, f, false, None)? {
+            let Some(lu) = b.loop_(l)?.loopuse else {
+                continue;
+            };
+            if !matches!(b.loopuse(lu)?.start, LoopuseStart::Edgeuse(_)) {
+                continue;
+            }
+            let eus = loopuse::edgeuses(b, lu, None, None)?;
+            let Some(&last) = eus.last() else {
+                continue;
+            };
+            let edge = crate::topology::edgeuse::p1::edge(b, last)?
+                .ok_or_else(|| invalid("loop edge use without edge"))?;
+            b.loopuse_mut(lu)?.start = LoopuseStart::Edgeuse(Some(last));
+            if let Some(mate) = b.loopuse(lu)?.mate {
+                let mut start = None;
+                for eu in loopuse::edgeuses(b, mate, None, None)? {
+                    if crate::topology::edgeuse::p1::edge(b, eu)? == Some(edge) {
+                        start = Some(eu);
+                        break;
+                    }
+                }
+                let start = start.ok_or_else(|| invalid("mate loop use without the start edge"))?;
+                b.loopuse_mut(mate)?.start = LoopuseStart::Edgeuse(Some(start));
+            }
+        }
+        p9::sync_face_cache(b, f)?;
+    }
+    Ok(())
+}
+
 // ---- MakeFacesWithCurves --------------------------------------------------------------
 
 /// `MakeFacesWithCurves`: [`p7::make_face_with_curves`] on `surface` (over `uv_domain`,
@@ -1571,6 +1616,9 @@ mod tests {
     /// (what `linear_sweep_caps_one_face` relies on; at 32 x 32 holes 129 s against 0.09 s).
     #[test]
     fn one_face_construction_makes_the_incremental_faces() {
+        // each face's loops in order, each loop's two uses edge by edge from their start:
+        // (the edge's first vertex, whether the use runs the edge's way)
+        type Uses = Vec<Vec<([i64; 3], bool)>>;
         let square = |x: f64, y: f64, s: f64| {
             vec![
                 line([x, y, 0.0], [x + s, y, 0.0]),
@@ -1578,6 +1626,39 @@ mod tests {
                 line([x + s, y + s, 0.0], [x, y + s, 0.0]),
                 line([x, y + s, 0.0], [x, y, 0.0]),
             ]
+        };
+        let describe = |b: &Brep, faces: &[FaceId]| -> Vec<Vec<Uses>> {
+            let eu_of = |eu| {
+                let e = crate::topology::edgeuse::p1::edge(b, eu).unwrap().unwrap();
+                let same =
+                    crate::topology::edgeuse::p1::orientation(b, eu).unwrap() == OrientType::Same;
+                let v = crate::topology::edge::vertex(b, e).unwrap().unwrap();
+                let p = b.vertex(v).unwrap().point;
+                ([p.x, p.y, p.z].map(|c| (c * 1e6).round() as i64), same)
+            };
+            faces
+                .iter()
+                .map(|&f| {
+                    face2::loops(b, f, false, None)
+                        .unwrap()
+                        .into_iter()
+                        .map(|l| {
+                            let lu = b.loop_(l).unwrap().loopuse.unwrap();
+                            let mate = b.loopuse(lu).unwrap().mate.unwrap();
+                            [lu, mate]
+                                .into_iter()
+                                .map(|u| {
+                                    loopuse::edgeuses(b, u, None, None)
+                                        .unwrap()
+                                        .into_iter()
+                                        .map(eu_of)
+                                        .collect()
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .collect()
         };
         for n in [1u32, 8] {
             let w = 3.0 * f64::from(n) + 1.0;
@@ -1591,46 +1672,27 @@ mod tests {
                     ));
                 }
             }
-            let describe = |b: &Brep, faces: &[FaceId]| {
-                let mut out: Vec<Vec<Vec<[i64; 3]>>> = faces
-                    .iter()
-                    .map(|&f| {
-                        let mut loops: Vec<Vec<[i64; 3]>> = face2::loops(b, f, false, None)
-                            .unwrap()
-                            .into_iter()
-                            .map(|l| {
-                                let mut at: Vec<[i64; 3]> = loopuse::loop_vertices(b, l)
-                                    .unwrap()
-                                    .into_iter()
-                                    .flatten()
-                                    .map(|v| {
-                                        let p = b.vertex(v).unwrap().point;
-                                        [p.x, p.y, p.z].map(|c| (c * 1e6).round() as i64)
-                                    })
-                                    .collect();
-                                at.sort_unstable();
-                                at
-                            })
-                            .collect();
-                        loops.sort();
-                        loops
-                    })
-                    .collect();
-                out.sort();
-                out
-            };
             let (r, b1) = with_brep(|k, b, fenv| {
                 k.fixes.face_classify_skips_loops_apart = true;
                 create_planar_faces_with_3d_curves(k, b, None, &curves, 1e-6, fenv)
             });
             let inc = describe(&b1, &r.unwrap());
-            let (r, b2) = with_brep(|k, b, fenv| {
+            let (r, mut b2) = with_brep(|k, b, fenv| {
                 create_planar_face_with_3d_curves(k, b, None, &curves, 1e-6, fenv)
             });
             assert!(r.unwrap().is_some(), "n {n}: a face");
             let faces: Vec<FaceId> = p1::faces(&b2, None).unwrap();
-            let one = describe(&b2, &faces);
-            assert_eq!(inc, one, "n {n}: the same faces");
+            assert_ne!(
+                inc,
+                describe(&b2, &faces),
+                "n {n}: the starts differ before"
+            );
+            start_loops_at_their_closing_edge(&mut b2, &faces).unwrap();
+            assert_eq!(
+                inc,
+                describe(&b2, &faces),
+                "n {n}: the same faces, loops and starts"
+            );
         }
     }
 

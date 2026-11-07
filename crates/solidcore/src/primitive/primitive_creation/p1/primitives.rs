@@ -219,12 +219,21 @@ fn sweep_cap_in(
     tolerance: f64,
 ) -> Result<()> {
     if k.fixes.linear_sweep_caps_one_face {
+        let faces_before = b.faces().slot_count();
         with_face_env_in(states, k, b, |k, b, fenv| {
             crate::topology::brep::p8::create_planar_face_with_3d_curves(
                 k, b, region, curves, tolerance, fenv,
             )
-        })
-        .map(drop)
+        })?;
+        // (each loop starting where the one-by-one construction starts it, so that what
+        // is counted round a cap's loops stays as it was)
+        let made: Vec<FaceId> = b
+            .faces()
+            .iter()
+            .map(|(f, _)| f)
+            .filter(|f| usize::try_from(f.index()).is_ok_and(|i| i >= faces_before))
+            .collect();
+        crate::topology::brep::p8::start_loops_at_their_closing_edge(b, &made)
     } else {
         planar_faces_in(states, k, b, region, curves, tolerance).map(drop)
     }

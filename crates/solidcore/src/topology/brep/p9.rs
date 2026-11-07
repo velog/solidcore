@@ -2207,7 +2207,7 @@ fn sync_edge_cache(b: &mut Brep, edge_id: EdgeId) -> Result<()> {
     Ok(())
 }
 
-fn sync_face_cache(b: &mut Brep, face: FaceId) -> Result<()> {
+pub(crate) fn sync_face_cache(b: &mut Brep, face: FaceId) -> Result<()> {
     use crate::topology::loopuse as lu;
     let loops = crate::topology::face::p2::loops(b, face, false, None)?;
     b.face_mut(face)?.loops.clone_from(&loops);
