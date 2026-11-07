@@ -1079,14 +1079,18 @@ mod tests {
         let mut curves: Vec<Curve> = square(0.0, 0.0, 10.0).into();
         for i in 0..3 {
             for j in 0..3 {
-                curves.extend(square(1.0 + 3.0 * f64::from(i), 1.0 + 3.0 * f64::from(j), 1.0));
+                curves.extend(square(
+                    1.0 + 3.0 * f64::from(i),
+                    1.0 + 3.0 * f64::from(j),
+                    1.0,
+                ));
             }
         }
         let refs: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
         let mut k = Kernel::default();
         let before = crate::topology::brep::p2::RENEWALS.with(std::cell::Cell::get);
-        let b = create_linear_sweep(&mut k, &refs, Vec3::new(0.0, 0.0, 1.0), 2.0, true)
-            .expect("plate");
+        let b =
+            create_linear_sweep(&mut k, &refs, Vec3::new(0.0, 0.0, 1.0), 2.0, true).expect("plate");
         let after = crate::topology::brep::p2::RENEWALS.with(std::cell::Cell::get);
         assert_eq!(b.face_list().len(), 4 + 9 * 4 + 2, "faces");
         assert_eq!(after.1 - before.1, 0, "a state made anew");

@@ -1209,7 +1209,13 @@ impl PrimitiveCreation {
                             )?;
                             let domain = cylinder.rev.base().natural_uv_domain();
                             ignore_or_pass_on(
-                                create_face_id_in(&mut states, k, brep, Surface::from(cylinder.clone()), domain),
+                                create_face_id_in(
+                                    &mut states,
+                                    k,
+                                    brep,
+                                    Surface::from(cylinder.clone()),
+                                    domain,
+                                ),
                                 p,
                             )?;
                             continue;
@@ -1227,7 +1233,13 @@ impl PrimitiveCreation {
                         {
                             let domain = cylinder.rev.base().natural_uv_domain();
                             ignore_or_pass_on(
-                                create_face_id_in(&mut states, k, brep, Surface::from(cylinder.clone()), domain),
+                                create_face_id_in(
+                                    &mut states,
+                                    k,
+                                    brep,
+                                    Surface::from(cylinder.clone()),
+                                    domain,
+                                ),
                                 p,
                             )?;
                             continue;
@@ -1243,7 +1255,13 @@ impl PrimitiveCreation {
                     ignore_or_pass_on(extrusion.adjust_step_uv_domain(k, &analytic_domain), p)?;
                     let domain = extrusion.base().natural_uv_domain();
                     ignore_or_pass_on(
-                        create_face_id_in(&mut states, k, brep, Surface::from(extrusion.clone()), domain),
+                        create_face_id_in(
+                            &mut states,
+                            k,
+                            brep,
+                            Surface::from(extrusion.clone()),
+                            domain,
+                        ),
                         p,
                     )?;
                     continue;
@@ -1253,7 +1271,14 @@ impl PrimitiveCreation {
             }
             if cap_ends {
                 ignore_or_pass_on(
-                    planar_faces_in(&mut states, k, brep, self.region(), &curves, brep.tolerance()),
+                    planar_faces_in(
+                        &mut states,
+                        k,
+                        brep,
+                        self.region(),
+                        &curves,
+                        brep.tolerance(),
+                    ),
                     p,
                 )?;
                 let mut translation = Axis2Placement::IDENTITY;
@@ -1265,7 +1290,14 @@ impl PrimitiveCreation {
                     end_curves.push(copy);
                 }
                 ignore_or_pass_on(
-                    planar_faces_in(&mut states, k, brep, self.region(), &end_curves, brep.tolerance()),
+                    planar_faces_in(
+                        &mut states,
+                        k,
+                        brep,
+                        self.region(),
+                        &end_curves,
+                        brep.tolerance(),
+                    ),
                     p,
                 )?;
             }

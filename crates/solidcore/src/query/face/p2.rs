@@ -1210,8 +1210,8 @@ fn point_classify_with_topology(
 
     // Opt-in (`face_classify_skips_loops_apart`): on a plane, an inner loop whose box
     // the point lies outside of is outside without the walk.
-    let skip_apart = k.fixes.face_classify_skips_loops_apart
-        && matches!(surface.kind(), SurfaceKind::Plane(_));
+    let skip_apart =
+        k.fixes.face_classify_skips_loops_apart && matches!(surface.kind(), SurfaceKind::Plane(_));
 
     // For every loop: check containment
     for l in loops {

@@ -803,7 +803,16 @@ impl ArenaNotifyState {
         state.seed(b);
         // (every record default, every live object's and no other: renewable)
         state.records.mark_all_default();
-        state.records.set_arena_seeded(super::p3::slot_counts(b));
+        state
+            .records
+            .set_arena_seeded(crate::topology::topology::SeedMark {
+                identity: crate::topology::loopuse::notify_ref(EntityRef::Brep(
+                    BrepId::from_index(0),
+                ))
+                .key,
+                seeded: super::p3::slot_counts(b),
+                dead: super::p3::dead_counts(b),
+            });
         state
     }
 
@@ -869,7 +878,11 @@ impl ArenaNotifyState {
             keys.sort_unstable();
             keys.dedup();
             records.reset_to_keys(&keys);
-            records.set_arena_seeded(super::p3::slot_counts(b));
+            records.set_arena_seeded(crate::topology::topology::SeedMark {
+                identity: notify_ref(EntityRef::Brep(BrepId::from_index(0))).key,
+                seeded: super::p3::slot_counts(b),
+                dead: super::p3::dead_counts(b),
+            });
         }
         Self {
             records,
@@ -932,62 +945,137 @@ impl ArenaNotifyState {
     }
 }
 
-/// (not upstream) Makes `records`, left by an earlier edit of `b` (the same B-rep
-/// value), exactly what [`ArenaNotifyState::new`] of `b` makes: the records the edit
-/// handed out mutably are made default again, or removed where their object is gone,
-/// the objects made since the records' seeding mark get a default record (the removed
-/// ones there lose theirs), the B-rep's [`brep_ref`] key that an edit through
-/// `topology::brep::p3` seeds is removed, and the result is checked by its count: every
-/// live object and the B-rep, no other. `false` when that cannot be told (no mark, a
-/// bulk access, an object removed without its record handed out): the caller then makes
-/// the records afresh. Lib tests compare every renewal with a fresh seeding.
+/// (not upstream) [`renew_records`] under the arena identities
+/// ([`crate::topology::loopuse::notify_ref`]), as [`ArenaNotifyState::new`] makes them:
+/// the B-rep's [`brep_ref`] key that an edit through `topology::brep::p3` seeds is not
+/// one of them.
 pub(crate) fn renew_arena_records(
     records: &mut crate::topology::topology::NotifyRecords,
     b: &Brep,
 ) -> bool {
-    let Some(mut seeded) = records.take_arena_seeded() else {
-        return false;
-    };
-    let renewed = renew_marked(records, b, &mut seeded);
-    #[cfg(test)]
-    RENEWALS.with(|n| {
-        let (kept, made) = n.get();
-        n.set(if renewed { (kept + 1, made) } else { (kept, made + 1) });
-    });
-    renewed
-}
-
-/// [`renew_arena_records`] of records with their seeding mark `seeded`.
-fn renew_marked(
-    records: &mut crate::topology::topology::NotifyRecords,
-    b: &Brep,
-    seeded: &mut [usize; super::p3::KINDS],
-) -> bool {
-    use crate::topology::loopuse::notify_ref;
-    if !records.reset_changed_dropping(|key| super::p3::arena_key_is_live(b, key)) {
-        return false;
-    }
-    let live = super::p3::seed_arena_from(records, b, seeded);
+    use crate::topology::loopuse::{entity_of_notify_key, notify_ref};
     let own = notify_ref(EntityRef::Brep(BrepId::from_index(0))).key;
-    records.or_default(own);
     let other = brep_ref(b).key;
     if other != own {
         records.remove_dead(other);
     }
-    // (the records just handed out are default: nothing to reset for them next time)
-    records.mark_all_default();
-    if records.len() != live + 1 {
+    renew_records(records, b, own, &[own], &notify_ref, &entity_of_notify_key)
+}
+
+/// (not upstream) Makes `records`, left by an earlier edit of `b` (the same B-rep
+/// value) under the identities `key_of` (`identity`: its key of the B-rep entity),
+/// exactly what a fresh seeding makes: a default record for every live object of `b`
+/// and for `extra` (the B-rep's keys), no other. The records the edit handed out
+/// mutably are made default again, or removed where `entity_of` says their object is
+/// gone; the objects made since the records' seeding mark get a record (the removed
+/// ones there lose theirs); the count is checked. `false` when that cannot be told (no
+/// mark, or one of other identities, a bulk access, an object removed without its
+/// record handed out): the caller then makes the records afresh, and sets the mark.
+/// Lib tests compare every renewal with a fresh seeding.
+pub(crate) fn renew_records(
+    records: &mut crate::topology::topology::NotifyRecords,
+    b: &Brep,
+    identity: ObjectKey,
+    extra: &[ObjectKey],
+    key_of: &dyn Fn(EntityRef) -> ObjectRef,
+    entity_of: &dyn Fn(ObjectKey) -> Option<EntityRef>,
+) -> bool {
+    let Some(mut mark) = records.take_arena_seeded() else {
+        return false;
+    };
+    let renewed =
+        mark.identity == identity && renew_marked(records, b, &mut mark, extra, key_of, entity_of);
+    if renewed {
+        records.set_arena_seeded(mark);
+    }
+    #[cfg(test)]
+    {
+        RENEWALS.with(|n| {
+            let (kept, made) = n.get();
+            n.set(if renewed {
+                (kept + 1, made)
+            } else {
+                (kept, made + 1)
+            });
+        });
+        if renewed {
+            let fresh: BTreeSet<ObjectKey> = super::p3::all_entities(b)
+                .filter(|e| !matches!(e, EntityRef::Brep(_)))
+                .map(|e| key_of(e).key)
+                .chain(extra.iter().copied())
+                .collect();
+            let ours: BTreeSet<ObjectKey> = records.keys().copied().collect();
+            assert_eq!(ours, fresh, "renewed notify records");
+            assert!(
+                records.values().all(|r| *r == Topology::default()),
+                "renewed records are default"
+            );
+        }
+    }
+    renewed
+}
+
+/// [`renew_records`] of records with their mark `mark` (updated to the renewal).
+fn renew_marked(
+    records: &mut crate::topology::topology::NotifyRecords,
+    b: &Brep,
+    mark: &mut crate::topology::topology::SeedMark,
+    extra: &[ObjectKey],
+    key_of: &dyn Fn(EntityRef) -> ObjectRef,
+    entity_of: &dyn Fn(ObjectKey) -> Option<EntityRef>,
+) -> bool {
+    use super::p3::{kind_index, KINDS};
+    // the records the edit handed out: default again, or gone with their object
+    // (counted per kind below the seeding mark)
+    let mut dropped = [0usize; KINDS];
+    let seeded = mark.seeded;
+    let reset = records.reset_changed_dropping(|key| {
+        let Some(e) = entity_of(key) else {
+            return false;
+        };
+        let Some((kind, index)) = kind_index(e) else {
+            return false;
+        };
+        if super::p3::entity_is_live(b, e) {
+            return false;
+        }
+        if let (Some(d), Some(&to)) = (dropped.get_mut(kind), seeded.get(kind)) {
+            if usize::try_from(index).is_ok_and(|i| i < to) {
+                *d += 1;
+            }
+        }
+        true
+    });
+    if !reset {
         return false;
     }
-    records.set_arena_seeded(*seeded);
-    #[cfg(test)]
-    assert_eq!(**records, *ArenaNotifyState::new(b).records, "renewed notify records");
-    true
+    let (live, new_dead) = super::p3::seed_from(records, b, &mut mark.seeded, key_of);
+    // objects removed without their record handed out: those kinds' keys are scanned
+    let dead = super::p3::dead_counts(b);
+    for kind in 0..KINDS {
+        let then = mark.dead.get(kind).copied().unwrap_or(0);
+        let now = dead.get(kind).copied().unwrap_or(0);
+        let told =
+            dropped.get(kind).copied().unwrap_or(0) + new_dead.get(kind).copied().unwrap_or(0);
+        if now > then + told {
+            super::p3::drop_dead_of_kind(records, b, kind, key_of, entity_of);
+        }
+    }
+    mark.dead = dead;
+    for &key in extra {
+        records.or_default(key);
+    }
+    // (the records just handed out are default: nothing to reset for them next time)
+    records.mark_all_default();
+    let mut wanted: Vec<ObjectKey> = extra.to_vec();
+    wanted.sort_unstable();
+    wanted.dedup();
+    records.len() == live + wanted.len()
 }
 
 #[cfg(test)]
 thread_local! {
-    /// [`renew_arena_records`] of marked records on this thread: (renewed, made anew).
+    /// [`renew_records`] of marked records on this thread: (renewed, made anew).
     pub(crate) static RENEWALS: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
 }

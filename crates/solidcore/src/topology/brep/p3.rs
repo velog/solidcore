@@ -769,7 +769,17 @@ fn reseed_records(
     records: &mut crate::topology::topology::NotifyRecords,
     b: &Brep,
     key_of: &dyn Fn(EntityRef) -> ObjectRef,
+    serial: u64,
 ) {
+    // (not upstream) records kept from the last edit of this B-rep under these
+    // identities are renewed incrementally, as a stitch's many edits each would
+    // otherwise list every object
+    let identity = key_of(brep_entity()).key;
+    let brep_key = p2::brep_ref(b).key;
+    let entity_of = |key: ObjectKey| topology_entity(serial, key);
+    if p2::renew_records(records, b, identity, &[brep_key], key_of, &entity_of) {
+        return;
+    }
     // The B-rep first: kernel keys (kind 0) and `entities` (by kind, then slot) come
     // out ascending, so the sort is skipped, as it gives the same vector either way.
     let mut keys: Vec<ObjectKey> = std::iter::once(p2::brep_ref(b).key)
@@ -783,6 +793,13 @@ fn reseed_records(
     // difference in keys is removed or added, so a stitch's many edits do not each
     // rebuild the whole map
     records.reset_to_keys(&keys);
+    if keys.len() == live_counts(b).into_iter().sum::<usize>() + 1 {
+        records.set_arena_seeded(topo::SeedMark {
+            identity,
+            seeded: slot_counts(b),
+            dead: dead_counts(b),
+        });
+    }
 }
 
 /// The kinds of topology keys with their class type codes (`GetType`), by kind number:
@@ -1083,47 +1100,53 @@ fn is_live(b: &Brep, kind: usize, index: u32) -> bool {
     }
 }
 
-/// (not upstream) Gives `records` a default record under the arena identity
-/// ([`crate::topology::loopuse::notify_ref`]) for every live object of `b` at an arena
-/// index from `seeded_to` on, per kind, removes the records of the removed objects at
-/// those indices, and moves `seeded_to` to the slot counts.
-/// Returns the number of live objects of `b`. For a caller that keeps one
-/// [`p2::ArenaNotifyState`] over a run of edits that add objects
-/// (`p2::ArenaNotifyState::renew`).
-pub(crate) fn seed_arena_from(
+/// (not upstream) Gives `records` a default record under `key_of` for every live object
+/// of `b` at an arena index from `seeded_to` on, per kind, removes the records of the
+/// removed objects at those indices, and moves `seeded_to` to the slot counts. Returns
+/// the number of live objects of `b` and, per kind, the removed slots among those
+/// indices. For a caller that keeps records over a run of edits (`p2::renew_records`).
+pub(crate) fn seed_from(
     records: &mut topo::NotifyRecords,
     b: &Brep,
     seeded_to: &mut [usize; KINDS],
-) -> usize {
-    for (kind, (slots, from)) in slot_counts(b)
+    key_of: &dyn Fn(EntityRef) -> ObjectRef,
+) -> (usize, [usize; KINDS]) {
+    let mut new_dead = [0; KINDS];
+    for ((kind, (slots, from)), dead) in slot_counts(b)
         .into_iter()
         .zip(seeded_to.iter_mut())
         .enumerate()
+        .zip(new_dead.iter_mut())
     {
         for index in (*from..slots).map_while(|i| u32::try_from(i).ok()) {
-            let key = crate::topology::loopuse::notify_ref(kind_entity(kind, index)).key;
+            let key = key_of(kind_entity(kind, index)).key;
             if is_live(b, kind, index) {
                 records.or_default(key);
             } else {
-                // (an object the last edit made and removed again: an edit's own
-                // seeding gave it a record while it lived)
+                *dead += 1;
+                // (an object an edit made and removed again: its own seeding gave it
+                // a record while it lived)
                 records.remove_dead(key);
             }
         }
         *from = slots.max(*from);
     }
-    live_counts(b).into_iter().sum()
+    (live_counts(b).into_iter().sum(), new_dead)
 }
 
-/// (not upstream) Whether the object an arena-identity key names
-/// ([`crate::topology::loopuse::notify_ref`]) is live in `b`; `true` for the B-rep and
-/// for a key that names no arena object (nothing to tell).
-pub(crate) fn arena_key_is_live(b: &Brep, key: ObjectKey) -> bool {
-    let Some(e) = crate::topology::loopuse::entity_of_notify_key(key) else {
-        return true;
-    };
-    let (kind, index) = match e {
-        EntityRef::Brep(_) => return true,
+/// (not upstream) The removed slots of each kind.
+pub(crate) fn dead_counts(b: &Brep) -> [usize; KINDS] {
+    let mut dead = slot_counts(b);
+    for (d, live) in dead.iter_mut().zip(live_counts(b)) {
+        *d = d.saturating_sub(live);
+    }
+    dead
+}
+
+/// (not upstream) The arena kind and index of `e`; `None` for the B-rep.
+pub(crate) fn kind_index(e: EntityRef) -> Option<(usize, u32)> {
+    Some(match e {
+        EntityRef::Brep(_) => return None,
         EntityRef::Region(x) => (0, x.index()),
         EntityRef::Shell(x) => (1, x.index()),
         EntityRef::Faceuse(x) => (2, x.index()),
@@ -1134,8 +1157,44 @@ pub(crate) fn arena_key_is_live(b: &Brep, key: ObjectKey) -> bool {
         EntityRef::Edge(x) => (7, x.index()),
         EntityRef::Vertexuse(x) => (8, x.index()),
         EntityRef::Vertex(x) => (9, x.index()),
-    };
-    is_live(b, kind, index)
+    })
+}
+
+/// (not upstream) Removes from `records` the records under `key_of` of the removed
+/// objects of kind `kind` (the keys of one kind are one range under either identity:
+/// kind in the high bits, index in the low ones).
+pub(crate) fn drop_dead_of_kind(
+    records: &mut topo::NotifyRecords,
+    b: &Brep,
+    kind: usize,
+    key_of: &dyn Fn(EntityRef) -> ObjectRef,
+    entity_of: &dyn Fn(ObjectKey) -> Option<EntityRef>,
+) {
+    let lo = key_of(kind_entity(kind, 0)).key;
+    let hi = key_of(kind_entity(kind, u32::MAX)).key;
+    let gone: Vec<ObjectKey> = records
+        .range(lo..=hi)
+        .map(|(&key, _)| key)
+        .filter(|&key| {
+            entity_of(key)
+                .and_then(kind_index)
+                .is_some_and(|(k, i)| k == kind && !is_live(b, k, i))
+        })
+        .collect();
+    for key in gone {
+        records.remove_dead(key);
+    }
+}
+
+/// (not upstream) Whether `e` is live in `b` (the B-rep itself always is).
+pub(crate) fn entity_is_live(b: &Brep, e: EntityRef) -> bool {
+    kind_index(e).is_none_or(|(kind, index)| is_live(b, kind, index))
+}
+
+/// Every topology object of `b` and the B-rep itself (for a renewal's check).
+#[cfg(test)]
+pub(crate) fn all_entities(b: &Brep) -> impl Iterator<Item = EntityRef> + '_ {
+    std::iter::once(brep_entity()).chain(entities(b))
 }
 
 /// The slot count of each kind, removed slots included (the next index of each).
@@ -1339,7 +1398,7 @@ pub(crate) fn kernel_named_edit<R>(
     let label = b.key();
     b.set_key(topology_ref(serial, brep_entity()).key);
     let mut records = std::mem::take(&mut k.notify_records);
-    reseed_records(&mut records, b, &key_of);
+    reseed_records(&mut records, b, &key_of, serial);
     let mut attributes = crate::geom::attribute::AttributeStore::default();
     // (not upstream) the B-rep's own attributes, under the edit's identities
     let seeded = p2::seed_brep_attributes(&mut attributes, b.take_attributes(), &key_of);

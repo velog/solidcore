@@ -1462,7 +1462,11 @@ mod tests {
         let mut curves = square(0.0, 0.0, 10.0);
         for i in 0..4 {
             for j in 0..4 {
-                curves.extend(square(1.0 + 2.2 * f64::from(i), 1.0 + 2.2 * f64::from(j), 1.0));
+                curves.extend(square(
+                    1.0 + 2.2 * f64::from(i),
+                    1.0 + 2.2 * f64::from(j),
+                    1.0,
+                ));
             }
         }
         let shape = |skip: bool| {

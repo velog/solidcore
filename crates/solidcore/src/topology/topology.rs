@@ -325,17 +325,30 @@ pub trait TopologyRecords {
 pub struct NotifyRecords {
     map: BTreeMap<ObjectKey, Topology>,
     progress: Vec<SeedProgress>,
-    /// (not upstream) Per arena kind, the slot count up to which every live object of
-    /// the B-rep these records were last made for has its arena-identity record and no
-    /// removed object has one (`topology::brep::p2::renew_arena_records`); `None` once
-    /// anything may have changed the keys otherwise.
-    arena_seeded: Option<[usize; 10]>,
+    /// (not upstream) What these records were last made for
+    /// (`topology::brep::p2::renew_records`); `None` once anything may have changed the
+    /// keys otherwise.
+    arena_seeded: Option<SeedMark>,
     /// The keys of the records handed out mutably since [`Self::reset_changed`] last ran,
     /// in hand-out order, with repeats (not upstream: so a reset visits only those).
     changed: Vec<ObjectKey>,
     /// Whether any record may have changed without its key in `changed` (a bulk
     /// mutable access, or records given at construction).
     all_changed: bool,
+}
+
+/// (not upstream) What a [`NotifyRecords`] was last made for, so that the next edit of
+/// the same B-rep value can renew it instead of comparing every key
+/// (`topology::brep::p2::renew_records`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SeedMark {
+    /// The identity the records are under: its key of the B-rep entity.
+    pub(crate) identity: ObjectKey,
+    /// Per arena kind, the slot count up to which every live object has its record
+    /// and no removed object has one.
+    pub(crate) seeded: [usize; 10],
+    /// Per arena kind, the removed slots then.
+    pub(crate) dead: [usize; 10],
 }
 
 /// How far a [`NotifyRecords`] has checked and seeded the objects of one B-rep value,
@@ -522,14 +535,14 @@ impl NotifyRecords {
     }
 
     /// The arena seeding mark ([`Self::arena_seeded`] field), taken out.
-    pub(crate) fn take_arena_seeded(&mut self) -> Option<[usize; 10]> {
+    pub(crate) fn take_arena_seeded(&mut self) -> Option<SeedMark> {
         self.arena_seeded.take()
     }
 
     /// Sets the arena seeding mark: the caller has just made every live object's record
     /// and no other, up to these slot counts.
-    pub(crate) fn set_arena_seeded(&mut self, seeded: [usize; 10]) {
-        self.arena_seeded = Some(seeded);
+    pub(crate) fn set_arena_seeded(&mut self, mark: SeedMark) {
+        self.arena_seeded = Some(mark);
     }
 
     /// Marks every record as unchanged: for a store whose records were all just made
@@ -540,20 +553,24 @@ impl NotifyRecords {
     }
 
     /// Makes every record handed out mutably since the last reset default again and
-    /// removes those of them whose object `live` says is gone, keeping the keys of the
-    /// others and the seeding progress; `false`, changing nothing, after a bulk
+    /// removes those of them whose object `gone` says is gone (each key asked once),
+    /// keeping the keys of the others and the seeding progress; `false`, changing nothing, after a bulk
     /// mutable access (which records changed is not known then).
-    pub(crate) fn reset_changed_dropping(&mut self, live: impl Fn(ObjectKey) -> bool) -> bool {
+    pub(crate) fn reset_changed_dropping(
+        &mut self,
+        mut gone: impl FnMut(ObjectKey) -> bool,
+    ) -> bool {
         if self.all_changed {
             return false;
         }
         for key in core::mem::take(&mut self.changed) {
-            if live(key) {
-                if let Some(record) = self.map.get_mut(&key) {
-                    *record = Topology::default();
-                }
-            } else {
+            if !self.map.contains_key(&key) {
+                continue;
+            }
+            if gone(key) {
                 self.map.remove(&key);
+            } else if let Some(record) = self.map.get_mut(&key) {
+                *record = Topology::default();
             }
         }
         true
