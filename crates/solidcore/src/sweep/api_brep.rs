@@ -1097,6 +1097,65 @@ mod tests {
         assert!(after.0 - before.0 >= 4 + 9 * 4, "states kept");
     }
 
+    /// `linear_sweep_caps_one_face`: a plate with 9 square holes swept with each kind of
+    /// cap construction has the same faces, a valid body and the same volume.
+    #[test]
+    fn one_face_caps_sweep_the_same_plate() {
+        let seg = |a: (f64, f64), b: (f64, f64)| {
+            Curve::from(
+                api_curves::create_line_segment(
+                    Point3::new(a.0, a.1, 0.0),
+                    Point3::new(b.0, b.1, 0.0),
+                )
+                .expect("line"),
+            )
+        };
+        let square = |x: f64, y: f64, s: f64| {
+            [
+                seg((x, y), (x + s, y)),
+                seg((x + s, y), (x + s, y + s)),
+                seg((x + s, y + s), (x, y + s)),
+                seg((x, y + s), (x, y)),
+            ]
+        };
+        let mut curves: Vec<Curve> = square(0.0, 0.0, 10.0).into();
+        for i in 0..3 {
+            for j in 0..3 {
+                curves.extend(square(
+                    1.0 + 3.0 * f64::from(i),
+                    1.0 + 3.0 * f64::from(j),
+                    1.0,
+                ));
+            }
+        }
+        let refs: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
+        let sweep = |one_face: bool| {
+            let mut k = Kernel::default();
+            k.fixes.linear_sweep_caps_one_face = one_face;
+            let mut b = create_linear_sweep(&mut k, &refs, Vec3::new(0.0, 0.0, 1.0), 2.0, true)
+                .expect("plate");
+            let check = crate::topology::brep::validation::check_brep(
+                &mut k,
+                &mut b,
+                crate::topology::brep::validation::CheckLevel::Level2,
+            )
+            .expect("check");
+            let volume = crate::mass::integrator::properties::brep_volume_default(&k, &mut b, 1e-6)
+                .expect("volume");
+            (b.face_list().len(), check.is_valid(), volume)
+        };
+        let (faces, valid, volume) = sweep(false);
+        let (faces1, valid1, volume1) = sweep(true);
+        assert_eq!(faces, 4 + 9 * 4 + 2);
+        assert_eq!(faces1, faces);
+        assert!(valid && valid1, "valid {valid} {valid1}");
+        assert!(
+            (volume1 - volume).abs() < 1e-9 * volume,
+            "{volume1} {volume}"
+        );
+        assert!((volume - (100.0 - 9.0) * 2.0).abs() < 1e-6, "{volume}");
+    }
+
     #[test]
     fn consuming_sweeps_copy_then_run_or_defer() {
         let mut k = Kernel::default();

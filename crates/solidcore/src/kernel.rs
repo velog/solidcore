@@ -1362,6 +1362,15 @@ pub struct UpstreamFixes {
     /// (`CreateFacesWithCurves`, the cap of a profile with n holes) is quadratic. Not in
     /// the C++ fork; a speed fix of our own.
     pub face_classify_skips_loops_apart: bool,
+    /// `SmPrimitiveCreation::CreateLinearSweep` makes each end cap with
+    /// `CreatePlanarFaceWith3DCurves` (the profile's outer loops grouped with the loops
+    /// directly inside them, each group one face in one construction) instead of
+    /// `CreatePlanarFacesWith3DCurves`, which starts from a face over the whole plane and
+    /// adds the loops one by one, each splitting a face and classifying against every
+    /// loop before it: the cap of a profile with n holes took n^2 (5041 holes: 27.6 s of a
+    /// 60 s extrude). The faces, loops and vertices are the same (a plate with 1024 square
+    /// holes: 129 s and 0.09 s). Not in the C++ fork; a speed fix of our own.
+    pub linear_sweep_caps_one_face: bool,
     /// `SmBrep::DeleteTopologicalVertex` joins an edge whose curve is a curve on a B-spline-kind surface along a UV line of constant u or v (the seam an extrusion leaves on its wall) as that surface's iso curve over the edge, the same curve exactly, so the seam of a full-turn face that a union runs on through a covered face is one edge (WR-598; the fork's tangency-labs/smlib@829b982). Upstream casts the curve's copy to `SmBSplineCurve` and dereferences the null; without the flag the port leaves the vertex in place (the routine's silent `SM_ERR`).
     pub delete_vertex_joins_seam_iso_curve: bool,
     /// `SmBrep::MakeEdgeTopology`, when a new edge joins a wire shell (its start vertex's) to a faceuse shell (its end vertex's), moves the wire shell's wires into the faceuse shell, puts the faceuse shell in the wire shell's place in the region's shell list and deletes the wire shell. Upstream moves every face use of the faceuse shell into the wire shell (and `SmShell::GetWireEdges` passes over every edge of the B-rep), the size of the body for each such edge a boolean makes. The shell left holds the same face uses in the same order and the same wires in the same place, but it is the faceuse shell's object, not the wire shell's (WR-585; the fork's tangency-labs/smlib@be8ac73).

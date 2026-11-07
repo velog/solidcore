@@ -1566,6 +1566,74 @@ mod tests {
         assert_eq!(plain[0].len(), 17, "the outline and 16 holes");
     }
 
+    /// A plate with 8 x 8 square holes: the incremental `CreatePlanarFacesWith3DCurves` and
+    /// the one-face `CreatePlanarFaceWith3DCurves` make the same faces, loops and vertices
+    /// (what `linear_sweep_caps_one_face` relies on; at 32 x 32 holes 129 s against 0.09 s).
+    #[test]
+    fn one_face_construction_makes_the_incremental_faces() {
+        let square = |x: f64, y: f64, s: f64| {
+            vec![
+                line([x, y, 0.0], [x + s, y, 0.0]),
+                line([x + s, y, 0.0], [x + s, y + s, 0.0]),
+                line([x + s, y + s, 0.0], [x, y + s, 0.0]),
+                line([x, y + s, 0.0], [x, y, 0.0]),
+            ]
+        };
+        for n in [1u32, 8] {
+            let w = 3.0 * f64::from(n) + 1.0;
+            let mut curves = square(0.0, 0.0, w);
+            for i in 0..n {
+                for j in 0..n {
+                    curves.extend(square(
+                        1.0 + 3.0 * f64::from(i),
+                        1.0 + 3.0 * f64::from(j),
+                        1.0,
+                    ));
+                }
+            }
+            let describe = |b: &Brep, faces: &[FaceId]| {
+                let mut out: Vec<Vec<Vec<[i64; 3]>>> = faces
+                    .iter()
+                    .map(|&f| {
+                        let mut loops: Vec<Vec<[i64; 3]>> = face2::loops(b, f, false, None)
+                            .unwrap()
+                            .into_iter()
+                            .map(|l| {
+                                let mut at: Vec<[i64; 3]> = loopuse::loop_vertices(b, l)
+                                    .unwrap()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|v| {
+                                        let p = b.vertex(v).unwrap().point;
+                                        [p.x, p.y, p.z].map(|c| (c * 1e6).round() as i64)
+                                    })
+                                    .collect();
+                                at.sort_unstable();
+                                at
+                            })
+                            .collect();
+                        loops.sort();
+                        loops
+                    })
+                    .collect();
+                out.sort();
+                out
+            };
+            let (r, b1) = with_brep(|k, b, fenv| {
+                k.fixes.face_classify_skips_loops_apart = true;
+                create_planar_faces_with_3d_curves(k, b, None, &curves, 1e-6, fenv)
+            });
+            let inc = describe(&b1, &r.unwrap());
+            let (r, b2) = with_brep(|k, b, fenv| {
+                create_planar_face_with_3d_curves(k, b, None, &curves, 1e-6, fenv)
+            });
+            assert!(r.unwrap().is_some(), "n {n}: a face");
+            let faces: Vec<FaceId> = p1::faces(&b2, None).unwrap();
+            let one = describe(&b2, &faces);
+            assert_eq!(inc, one, "n {n}: the same faces");
+        }
+    }
+
     #[test]
     fn a_square_reaches_the_face_construction_and_restores_editing() {
         let square = vec![

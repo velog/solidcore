@@ -205,6 +205,31 @@ fn planar_face(
         )
     })
 }
+/// The cap of a linear sweep over the profile `curves` ([`FaceStates`]): with
+/// `fixes.linear_sweep_caps_one_face` the faces of each outer loop and the loops directly
+/// inside it in one construction each (`CreatePlanarFaceWith3DCurves`), else
+/// `CreatePlanarFacesWith3DCurves`, which adds the loops to one face one by one (each
+/// splitting it and classifying against every loop before: a cap with n holes took n^2).
+fn sweep_cap_in(
+    states: &mut FaceStates,
+    k: &mut Kernel,
+    b: &mut Brep,
+    region: Option<RegionId>,
+    curves: &[Curve],
+    tolerance: f64,
+) -> Result<()> {
+    if k.fixes.linear_sweep_caps_one_face {
+        with_face_env_in(states, k, b, |k, b, fenv| {
+            crate::topology::brep::p8::create_planar_face_with_3d_curves(
+                k, b, region, curves, tolerance, fenv,
+            )
+        })
+        .map(drop)
+    } else {
+        planar_faces_in(states, k, b, region, curves, tolerance).map(drop)
+    }
+}
+
 pub(super) fn planar_faces(
     k: &mut Kernel,
     b: &mut Brep,
@@ -1271,7 +1296,7 @@ impl PrimitiveCreation {
             }
             if cap_ends {
                 ignore_or_pass_on(
-                    planar_faces_in(
+                    sweep_cap_in(
                         &mut states,
                         k,
                         brep,
@@ -1290,7 +1315,7 @@ impl PrimitiveCreation {
                     end_curves.push(copy);
                 }
                 ignore_or_pass_on(
-                    planar_faces_in(
+                    sweep_cap_in(
                         &mut states,
                         k,
                         brep,
