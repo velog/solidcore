@@ -461,6 +461,13 @@ impl NotifyRecords {
         self.map.remove(key)
     }
 
+    /// Removes the record of `key`, an object that is gone, keeping the seeding
+    /// progress: the progress only says which live objects have their record, and a
+    /// removed object's slot is never live again (arenas only empty slots for good).
+    pub(crate) fn remove_dead(&mut self, key: &ObjectKey) -> Option<Topology> {
+        self.map.remove(key)
+    }
+
     /// Keeps the records `keep` accepts (it may also change them).
     pub fn retain(&mut self, keep: impl FnMut(&ObjectKey, &mut Topology) -> bool) {
         self.progress.clear();

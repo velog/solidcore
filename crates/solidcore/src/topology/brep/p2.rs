@@ -851,10 +851,16 @@ impl ArenaNotifyState {
         // its next edit seeds again whether or not this state has it)
         let other = brep_ref(b).key;
         let extra = usize::from(other != own && self.records.contains_key(&other));
-        if self.records.len() != live + 1 + extra {
+        let renewed = self.records.len() == live + 1 + extra;
+        if !renewed {
             *self = Self::new(b);
             *seeded_to = super::p3::slot_counts(b);
         }
+        #[cfg(test)]
+        RENEWALS.with(|n| {
+            let (kept, made) = n.get();
+            n.set(if renewed { (kept + 1, made) } else { (kept, made + 1) });
+        });
         // (every lib test that sweeps checks the renewed state against a fresh one)
         #[cfg(test)]
         {
@@ -943,6 +949,13 @@ impl ArenaNotifyState {
             key_of: &crate::topology::loopuse::notify_ref,
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`ArenaNotifyState::renew`] on this thread: (states kept, states made anew).
+    pub(crate) static RENEWALS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 /// The tag of a copy's source identities ([`copy_source_ref`]): above the arena kinds

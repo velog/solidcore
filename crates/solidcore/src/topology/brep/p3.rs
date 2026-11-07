@@ -1085,7 +1085,8 @@ fn is_live(b: &Brep, kind: usize, index: u32) -> bool {
 
 /// (not upstream) Gives `records` a default record under the arena identity
 /// ([`crate::topology::loopuse::notify_ref`]) for every live object of `b` at an arena
-/// index from `seeded_to` on, per kind, and moves `seeded_to` to the slot counts.
+/// index from `seeded_to` on, per kind, removes the records of the removed objects at
+/// those indices, and moves `seeded_to` to the slot counts.
 /// Returns the number of live objects of `b`. For a caller that keeps one
 /// [`p2::ArenaNotifyState`] over a run of edits that add objects
 /// (`p2::ArenaNotifyState::renew`).
@@ -1100,8 +1101,13 @@ pub(crate) fn seed_arena_from(
         .enumerate()
     {
         for index in (*from..slots).map_while(|i| u32::try_from(i).ok()) {
+            let key = crate::topology::loopuse::notify_ref(kind_entity(kind, index)).key;
             if is_live(b, kind, index) {
-                records.or_default(crate::topology::loopuse::notify_ref(kind_entity(kind, index)).key);
+                records.or_default(key);
+            } else {
+                // (an object the last edit made and removed again: an edit's own
+                // seeding gave it a record while it lived)
+                records.remove_dead(&key);
             }
         }
         *from = slots.max(*from);

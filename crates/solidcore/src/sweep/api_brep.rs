@@ -1054,6 +1054,45 @@ mod tests {
         matches!(r, Err(SolidError::InvalidInput { .. }))
     }
 
+    /// A plate with 9 square holes swept: the walls and caps reuse one notification
+    /// state (`ArenaNotifyState::renew`, which lib tests compare with a fresh state on
+    /// every face), never making it anew, and the solid has every face.
+    #[test]
+    fn a_sweep_of_many_loops_keeps_one_notification_state() {
+        let seg = |a: (f64, f64), b: (f64, f64)| {
+            Curve::from(
+                api_curves::create_line_segment(
+                    Point3::new(a.0, a.1, 0.0),
+                    Point3::new(b.0, b.1, 0.0),
+                )
+                .expect("line"),
+            )
+        };
+        let square = |x: f64, y: f64, s: f64| {
+            [
+                seg((x, y), (x + s, y)),
+                seg((x + s, y), (x + s, y + s)),
+                seg((x + s, y + s), (x, y + s)),
+                seg((x, y + s), (x, y)),
+            ]
+        };
+        let mut curves: Vec<Curve> = square(0.0, 0.0, 10.0).into();
+        for i in 0..3 {
+            for j in 0..3 {
+                curves.extend(square(1.0 + 3.0 * f64::from(i), 1.0 + 3.0 * f64::from(j), 1.0));
+            }
+        }
+        let refs: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
+        let mut k = Kernel::default();
+        let before = crate::topology::brep::p2::RENEWALS.with(std::cell::Cell::get);
+        let b = create_linear_sweep(&mut k, &refs, Vec3::new(0.0, 0.0, 1.0), 2.0, true)
+            .expect("plate");
+        let after = crate::topology::brep::p2::RENEWALS.with(std::cell::Cell::get);
+        assert_eq!(b.face_list().len(), 4 + 9 * 4 + 2, "faces");
+        assert_eq!(after.1 - before.1, 0, "a state made anew");
+        assert!(after.0 - before.0 >= 4 + 9 * 4, "states kept");
+    }
+
     #[test]
     fn consuming_sweeps_copy_then_run_or_defer() {
         let mut k = Kernel::default();
